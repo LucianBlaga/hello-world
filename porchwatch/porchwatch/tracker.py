@@ -10,6 +10,8 @@ import itertools
 from collections import deque
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from .detectors import Detection
 
 
@@ -24,10 +26,16 @@ class Track:
     def travel(self, now: float, window: float) -> float:
         """Distance (pixels) the centre moved over the last `window` seconds."""
         pts = [(t, x, y) for t, x, y in self.history if now - t <= window]
-        if len(pts) < 2:
+        if len(pts) < 4:
+            return 0.0                  # too few sightings to tell (noise would look like motion)
+        # Fit a straight line through the centres: box jitter averages out,
+        # steady movement doesn't.
+        ts = np.array([p[0] for p in pts]) - pts[0][0]
+        if ts[-1] <= 0:
             return 0.0
-        (_, x0, y0), (_, x1, y1) = pts[0], pts[-1]
-        return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        vx = np.polyfit(ts, [p[1] for p in pts], 1)[0]
+        vy = np.polyfit(ts, [p[2] for p in pts], 1)[0]
+        return float(np.hypot(vx, vy) * ts[-1])
 
     def age(self, now: float) -> float:
         return now - self.first_seen

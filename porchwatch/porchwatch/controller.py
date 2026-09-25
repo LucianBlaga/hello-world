@@ -6,6 +6,7 @@ returns home to watch for the next one.
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import Counter, deque
@@ -20,6 +21,10 @@ from .config import Config
 from .detectors import PERSON, VEHICLE, Detection, sharpness
 from .storage import draw_label
 from .tracker import CentroidTracker
+
+
+# Detailed per-decision tracking log (written to logs/tracking.log by the app).
+tlog = logging.getLogger("porchwatch.track")
 
 
 class State(str, Enum):
@@ -248,7 +253,9 @@ class Controller:
             if k != kind:
                 continue
             dt = now - t_end
-            if abs(pan - (p + vp * dt)) < 10 and abs(tilt - (t + vt * dt)) < 10:
+            # The speed estimate isn't perfect: allow more slack the longer ago it was.
+            tol = 10 + 0.3 * math.hypot(vp, vt) * dt
+            if abs(pan - (p + vp * dt)) < tol and abs(tilt - (t + vt * dt)) < tol:
                 return True
         return False
 
@@ -290,6 +297,9 @@ class Controller:
             self.target.hist.append((ts, *self.img_to_world(cx + off_x, cy + off_y, w, h)))
         self.state = State.TRACK
         self.storage.log(f"Tracking {det.label}")
+        vp, vt = self.target.velocity()
+        tlog.info("START %s at pan %.1f tilt %.1f, speed %.1f/%.1f deg/s, camera at pan %.1f zoom %.2f",
+                  det.label, world[0], world[1], vp, vt, self.ptz.est.pan, self.ptz.est.zoom)
 
     # ------------------------------------------------------------ TRACK
     def _aim_point(self, det: Detection, feature_box, h):
@@ -326,6 +336,9 @@ class Controller:
         h, w = frame.shape[:2]
 
         det = self._match(dets, w, h, now)
+        if det is None:
+            tlog.debug("NO MATCH (%d detections of other kinds/too far), %.1fs since last seen",
+                       len(dets), now - t.last_seen)
         if det is not None:
             t.det, t.last_seen = det, now
             self._analyse(frame, det, now)
@@ -337,6 +350,8 @@ class Controller:
                 ax, ay = self._aim_point(det, t.feature_box, h)
                 t.world, t.world_t = self.img_to_world(ax, ay, w, h), now
                 t.hist.append((now, *t.world))
+                tlog.debug("MEASURE target pan %.1f tilt %.1f (in picture x=%.2f y=%.2f), camera est pan %.1f tilt %.1f zoom %.2f",
+                           *t.world, ax / w, ay / h, self.ptz.est.pan, self.ptz.est.tilt, self.ptz.est.zoom)
                 if self.ptz_enabled:
                     self._command(det, ax, ay, w, h, now)
                 elif t.zoomed_at is None:
@@ -398,6 +413,8 @@ class Controller:
         if det.kind == VEHICLE and det.width / w > tc.vehicle_fill:
             zoom = min(zoom, real.zoom * tc.vehicle_fill / (det.width / w))
         zoom = min(zoom, self.cfg.camera.max_zoom_ratio)
+        tlog.debug("COMMAND speed %.1f/%.1f deg/s, lead %.2fs -> pan %.1f tilt %.1f zoom %.2f",
+                   vp, vt, lead, new_pan, new_tilt, zoom)
         at_goal = fill is not None and 0.8 <= goal / max(fill, 1e-3) <= 1.1
         at_max = zoom >= self.cfg.camera.max_zoom_ratio - 1e-3
         if t.zoomed_at is None and centred and (at_goal or at_max):
@@ -463,6 +480,7 @@ class Controller:
 
     def _finish(self, now, reason):
         t = self.target
+        tlog.info("END %s after %.1fs: %s (plate votes %s)", t.label, now - t.started, reason, dict(t.plate_votes))
         images, meta = {}, {"kind": t.kind, "label": t.label, "reason": reason,
                             "duration_s": round(now - t.started, 1)}
         if t.kind == PERSON and t.best_face:
@@ -482,7 +500,8 @@ class Controller:
             self.last_event = self.storage.save_event(meta, images)
         vp, vt = t.velocity()
         hold = self.cfg.tracking.recapture_after_s if (t.best_face or t.plate_votes) else 3.0
-        self.recent.append((t.kind, *t.world, vp, vt, now, now + hold))
+        # Remember where it is NOW (the last clean measurement may be ~1 s old).
+        self.recent.append((t.kind, *self._predict(now), vp, vt, now, now + hold))
         self.target = None
         self.state = State.HOME
         self.tracker.reset()

@@ -104,8 +104,25 @@ class App:
         return self._plates
 
     # ------------------------------------------------------------ main loop
+    def _setup_tracking_log(self) -> None:
+        """logs/tracking.log: every tracking decision, for diagnosing camera behaviour."""
+        from logging.handlers import RotatingFileHandler
+        from pathlib import Path
+
+        tl = logging.getLogger("porchwatch.track")
+        if tl.handlers:
+            return
+        Path("logs").mkdir(exist_ok=True)
+        fh = RotatingFileHandler("logs/tracking.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", "%H:%M:%S"))
+        tl.addHandler(fh)
+        tl.setLevel(logging.DEBUG)
+        tl.propagate = False
+
     def run(self) -> None:
         from .web import start_web
+
+        self._setup_tracking_log()
 
         start_web(self)
         threading.Thread(target=self._retention_loop, name="retention", daemon=True).start()

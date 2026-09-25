@@ -418,3 +418,31 @@ def test_follows_person_with_real_camera_lag(tmp_path, gimbal):
     assert errors and max(errors) < 0.6, f"person got {max(errors):.0%} of the way to the picture edge"
     ev = sim.events()
     assert len(ev) == 1 and "face" in ev[0]["files"]
+
+
+@pytest.mark.parametrize("gimbal", GIMBALS)
+def test_stays_on_moving_car_passing_parked_cars(tmp_path, gimbal):
+    sim = Sim(tmp_path, **GIMBALS[gimbal])
+    sim.ctl.plates = StrictPlates()
+    for p in (-12, 6, 22):                                                   # a row of parked cars
+        sim.objects.append(car(sim, pan0=p, speed=0.0, label="car", color=(40, 160, 40)))
+    mover = car(sim, pan0=-40, speed=8.0, label="car", color=(200, 90, 40))
+    mover["top"], mover["bottom"] = -4.0, -9.0                               # driving lane, just in front
+    sim.objects.append(mover)
+    errors, started = [], []
+
+    def watch(s):
+        if s.ctl.state == State.TRACK:
+            started.append(s.t)
+            if s.t - started[0] > 1.5:
+                pan = mover["pan0"] + mover["speed"] * (s.t - mover["t0"])
+                half = math.degrees(math.atan(math.tan(math.radians(s.cfg.camera.hfov_deg / 2)) / s.true.zoom))
+                errors.append(abs(pan - s.true.pan) / half)
+        else:
+            started.clear()
+
+    sim.run(9, watch)
+    plates = [e.get("plate") for e in sim.events()]
+    assert "PARKED1" not in plates, plates
+    if errors:
+        assert max(errors) < 0.8, f"moving car got {max(errors):.0%} of the way to the edge"
