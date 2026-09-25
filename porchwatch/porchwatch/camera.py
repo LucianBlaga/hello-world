@@ -26,10 +26,39 @@ from .config import CameraConfig
 log = logging.getLogger(__name__)
 
 
+def windows_camera_names() -> list[str]:
+    """DirectShow camera names in index order (same order OpenCV's CAP_DSHOW uses)."""
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+    except ImportError:
+        log.warning("Camera names unavailable: python -m pip install pygrabber")
+        return []
+    try:
+        return list(FilterGraph().get_input_devices())
+    except Exception as exc:
+        log.warning("Could not list cameras: %s", exc)
+        return []
+
+
+def resolve_device(device):
+    """"0" -> 0; on Windows a name such as "OBSBOT Tiny 2" -> its index."""
+    if isinstance(device, str) and device.strip().isdigit():
+        return int(device)
+    if isinstance(device, str) and platform.system() == "Windows":
+        names = windows_camera_names()
+        matches = [i for i, n in enumerate(names) if device.lower() in n.lower()]
+        # Prefer the real camera over OBSBOT Center's virtual camera.
+        real = [i for i in matches if "virtual" not in names[i].lower()]
+        if real or matches:
+            idx = (real or matches)[0]
+            log.info("Using camera %d: %s", idx, names[idx])
+            return idx
+        raise RuntimeError(f"No camera named like {device!r}. Found: {names or 'none'}")
+    return device
+
+
 def _open_capture(cfg: CameraConfig) -> cv2.VideoCapture:
-    device = cfg.device
-    if isinstance(device, str) and device.isdigit():
-        device = int(device)
+    device = resolve_device(cfg.device)
     system = platform.system()
     if isinstance(device, int) and system == "Windows":
         cap = cv2.VideoCapture(device, cv2.CAP_DSHOW)
@@ -135,6 +164,7 @@ class PTZ:
 
     default_raw_pan = (-130, 130)
     default_raw_tilt = (-90, 90)
+    default_raw_zoom = (0, 100)
 
     def __init__(self, cfg: CameraConfig, clock=time.time):
         self.cfg = cfg
@@ -164,7 +194,7 @@ class PTZ:
         tilt = -st.tilt if c.invert_tilt else st.tilt
         raw_pan = self._map(pan, c.pan_limits, c.raw_pan_range or self.default_raw_pan)
         raw_tilt = self._map(tilt, c.tilt_limits, c.raw_tilt_range or self.default_raw_tilt)
-        raw_zoom = self._map(st.zoom, (1.0, c.max_zoom_ratio), c.raw_zoom_range)
+        raw_zoom = self._map(st.zoom, (1.0, c.max_zoom_ratio), c.raw_zoom_range or self.default_raw_zoom)
         return int(round(raw_pan)), int(round(raw_tilt)), int(round(raw_zoom))
 
     def fov(self) -> tuple[float, float]:
@@ -246,12 +276,114 @@ class V4L2PTZ(PTZ):
             log.warning("v4l2-ctl failed: %s", res.stderr.strip())
 
 
+# DirectShow IAMCameraControl (strmif.h). Property ids and flags:
+CC_PAN, CC_TILT, CC_ZOOM = 0, 1, 3
+CC_FLAGS_MANUAL = 2
+
+
+def _camera_control(index: int):
+    """Open the IAMCameraControl interface of DirectShow video device `index`."""
+    from ctypes import HRESULT, POINTER, c_long
+
+    from comtypes import COMMETHOD, GUID, IUnknown
+    from pygrabber.dshow_graph import SystemDeviceEnum
+    from pygrabber.dshow_ids import DeviceCategories
+
+    class IAMCameraControl(IUnknown):
+        _iid_ = GUID("{C6E13370-30AC-11d0-A18C-00A0C9118956}")
+        _methods_ = [
+            COMMETHOD([], HRESULT, "GetRange",
+                      (["in"], c_long, "Property"),
+                      (["out"], POINTER(c_long), "pMin"),
+                      (["out"], POINTER(c_long), "pMax"),
+                      (["out"], POINTER(c_long), "pSteppingDelta"),
+                      (["out"], POINTER(c_long), "pDefault"),
+                      (["out"], POINTER(c_long), "pCapsFlags")),
+            COMMETHOD([], HRESULT, "Set",
+                      (["in"], c_long, "Property"),
+                      (["in"], c_long, "lValue"),
+                      (["in"], c_long, "Flags")),
+            COMMETHOD([], HRESULT, "Get",
+                      (["in"], c_long, "Property"),
+                      (["out"], POINTER(c_long), "lValue"),
+                      (["out"], POINTER(c_long), "Flags")),
+        ]
+
+    filt, name = SystemDeviceEnum().get_filter_by_index(DeviceCategories.VideoInputDevice, index)
+    return filt.QueryInterface(IAMCameraControl), name
+
+
+def camera_control_ranges(ctrl) -> dict:
+    """{property: (min, max, step, default)} for pan/tilt/zoom the device supports."""
+    ranges = {}
+    for prop in (CC_PAN, CC_TILT, CC_ZOOM):
+        try:
+            mn, mx, step, default, _caps = ctrl.GetRange(prop)
+            if mx > mn:
+                ranges[prop] = (mn, mx, step, default)
+        except Exception:
+            pass
+    return ranges
+
+
+class DShowPTZ(PTZ):
+    """Windows: DirectShow camera control, talking to the driver directly.
+
+    Uses the ranges the camera itself reports, so no calibration is needed.
+    """
+
+    def __init__(self, cfg: CameraConfig, index: int):
+        super().__init__(cfg)
+        self.ctrl, self.name = _camera_control(index)
+        self.ranges = camera_control_ranges(self.ctrl)
+        if not self.ranges:
+            raise RuntimeError(f"Camera {index} ({self.name}) has no pan/tilt/zoom controls")
+        if CC_PAN in self.ranges:
+            self.default_raw_pan = self.ranges[CC_PAN][:2]
+        if CC_TILT in self.ranges:
+            self.default_raw_tilt = self.ranges[CC_TILT][:2]
+        if CC_ZOOM in self.ranges:
+            self.default_raw_zoom = self.ranges[CC_ZOOM][:2]
+        log.info("PTZ via DirectShow on %s: %s", self.name,
+                 {k: v[:2] for k, v in zip(("pan", "tilt", "zoom"), (self.ranges.get(p) for p in (CC_PAN, CC_TILT, CC_ZOOM))) if v})
+
+    def to_raw(self, st):
+        # The device's own ranges are authoritative on this backend.
+        c = self.cfg
+        pan = -st.pan if c.invert_pan else st.pan
+        tilt = -st.tilt if c.invert_tilt else st.tilt
+        return (int(round(self._map(pan, c.pan_limits, self.default_raw_pan))),
+                int(round(self._map(tilt, c.tilt_limits, self.default_raw_tilt))),
+                int(round(self._map(st.zoom, (1.0, c.max_zoom_ratio), self.default_raw_zoom))))
+
+    def _send(self, pan, tilt, zoom):
+        for prop, value in ((CC_PAN, pan), (CC_TILT, tilt), (CC_ZOOM, zoom)):
+            if prop not in self.ranges:
+                continue
+            mn, mx = self.ranges[prop][:2]
+            try:
+                self.ctrl.Set(prop, int(min(max(value, mn), mx)), CC_FLAGS_MANUAL)
+            except Exception as exc:
+                log.warning("Camera control %d=%d failed: %s", prop, value, exc)
+
+
 def make_ptz(cfg: CameraConfig, source: FrameSource) -> PTZ:
     backend = cfg.ptz_backend
     if source.is_file or backend == "none":
         return NullPTZ(cfg)
     if backend == "auto":
-        backend = "v4l2" if platform.system() == "Linux" else "opencv"
+        if platform.system() == "Linux":
+            backend = "v4l2"
+        elif platform.system() == "Windows":
+            try:
+                return DShowPTZ(cfg, resolve_device(cfg.device))
+            except Exception as exc:
+                log.warning("DirectShow camera control unavailable (%s); trying OpenCV", exc)
+            backend = "opencv"
+        else:
+            backend = "opencv"
+    if backend == "dshow":
+        return DShowPTZ(cfg, resolve_device(cfg.device))
     if backend == "v4l2":
         return V4L2PTZ(cfg)
     if backend == "opencv":
@@ -270,7 +402,37 @@ def probe(cfg: CameraConfig) -> str:
             lines.append(res.stdout or res.stderr)
     else:
         cap = _open_capture(cfg)
-        for name in ("PAN", "TILT", "ZOOM", "FOCUS", "EXPOSURE", "FRAME_WIDTH", "FRAME_HEIGHT", "FPS"):
+        for name in ("FRAME_WIDTH", "FRAME_HEIGHT", "FPS"):
             lines.append(f"{name:14s} = {cap.get(getattr(cv2, 'CAP_PROP_' + name))}")
         cap.release()
+        if platform.system() == "Windows":
+            try:
+                ctrl, name = _camera_control(resolve_device(cfg.device))
+                lines.append(f"DirectShow camera control on: {name}")
+                ranges = camera_control_ranges(ctrl)
+                for label, prop in (("pan", CC_PAN), ("tilt", CC_TILT), ("zoom", CC_ZOOM)):
+                    r = ranges.get(prop)
+                    lines.append(f"  {label:5s}: " + (f"min={r[0]} max={r[1]} step={r[2]} default={r[3]}" if r else "NOT SUPPORTED"))
+            except Exception as exc:
+                lines.append(f"DirectShow camera control failed: {exc}")
+    return "\n".join(lines)
+
+
+def list_devices() -> str:
+    """List cameras and whether each one can pan/tilt/zoom."""
+    if platform.system() != "Windows":
+        return "On Linux use: v4l2-ctl --list-devices"
+    names = windows_camera_names()
+    if not names:
+        return "No cameras found (or pygrabber missing: python -m pip install pygrabber)."
+    lines = ["Cameras (number: name -> pan/tilt/zoom support):"]
+    for i, name in enumerate(names):
+        try:
+            ranges = camera_control_ranges(_camera_control(i)[0])
+            ptz = ", ".join(l for l, p in (("pan", CC_PAN), ("tilt", CC_TILT), ("zoom", CC_ZOOM)) if p in ranges) or "none"
+        except Exception as exc:
+            ptz = f"none ({exc.__class__.__name__})"
+        lines.append(f"  {i}: {name}  ->  {ptz}")
+    lines.append("")
+    lines.append("Put the right one in Settings > Camera device (number or name, e.g. OBSBOT Tiny 2).")
     return "\n".join(lines)

@@ -8,22 +8,25 @@ from typing import Any
 
 @dataclass
 class CameraConfig:
-    # Device index (Windows/macOS) or path such as /dev/video0 (Linux).
+    # Device index, a camera name on Windows (e.g. "OBSBOT Tiny 2"; list them with
+    # `python -m porchwatch devices`) or a path such as /dev/video0 on Linux.
     device: Any = 0
     width: int = 1920          # 3840x2160 gives much better plate reads, costs CPU/USB.
     height: int = 1080
     fps: int = 30
-    # "auto" -> v4l2 on Linux, OpenCV/DirectShow elsewhere. "none" disables PTZ.
+    # "auto" -> DirectShow camera control on Windows (falls back to OpenCV),
+    # v4l2 on Linux. "none" disables PTZ.
     ptz_backend: str = "auto"
     # Physical limits in degrees and the zoom ratio at zoom 0 / zoom max.
     pan_limits: tuple = (-130.0, 130.0)
     tilt_limits: tuple = (-90.0, 90.0)
     max_zoom_ratio: float = 4.0
-    # Raw control ranges the driver reports (see `python -m porchwatch probe`).
+    # Raw control ranges for the opencv/v4l2 backends (see `python -m porchwatch probe`).
+    # The Windows DirectShow backend reads them from the camera itself.
     # Linux UVC: pan/tilt in arc-seconds. DirectShow: degrees.
     raw_pan_range: tuple | None = None    # None -> backend default
     raw_tilt_range: tuple | None = None
-    raw_zoom_range: tuple = (0, 100)
+    raw_zoom_range: tuple | None = None   # None -> backend default (0-100)
     invert_pan: bool = False
     invert_tilt: bool = False
     # Field of view at 1x zoom (degrees). Tiny 2: ~86 deg diagonal.

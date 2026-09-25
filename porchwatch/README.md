@@ -40,6 +40,7 @@ Linux only: `sudo apt install v4l-utils` (used for pan/tilt/zoom).
 3. Check PorchWatch can see and move it:
 
 ```bash
+python -m porchwatch devices     # lists cameras and which ones can pan/tilt/zoom
 python -m porchwatch probe       # lists the camera's controls and resolutions
 python -m porchwatch test-ptz    # pans right/left, tilts up/down, zooms 2x/4x, returns home
 ```

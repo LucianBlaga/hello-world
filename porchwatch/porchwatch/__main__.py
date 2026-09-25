@@ -2,6 +2,7 @@
 
     python -m porchwatch                 # run (camera + dashboard)
     python -m porchwatch --video street.mp4 --no-ptz
+    python -m porchwatch devices         # list cameras and which can pan/tilt/zoom
     python -m porchwatch probe           # show camera controls / formats
     python -m porchwatch test-ptz        # move the gimbal through a short routine
 """
@@ -31,10 +32,21 @@ def _test_ptz(cfg) -> None:
             ("zoom 4x", PTZState(0, 0, 4.0)),
             ("home", PTZState(cfg.camera.home_pan, cfg.camera.home_tilt, 1.0)),
         ]
+        print(f"PTZ backend: {type(ptz).__name__}")
         for name, st in steps:
-            print(f"{name:14s} raw={ptz.to_raw(ptz.clamp(st))}")
+            print(f"{name:14s} sent={ptz.to_raw(ptz.clamp(st))}", end="", flush=True)
             ptz.move(st, force=True)
             time.sleep(2.0)
+            ctrl = getattr(ptz, "ctrl", None)
+            if ctrl is not None:        # DirectShow: read back where the camera says it is
+                now = []
+                for prop in (0, 1, 3):
+                    try:
+                        now.append(ctrl.Get(prop)[0])
+                    except Exception:
+                        now.append("?")
+                print(f"  camera reports={tuple(now)}", end="")
+            print()
         print("If it moved the wrong way, set camera.invert_pan / invert_tilt in Settings.")
     finally:
         src.close()
@@ -42,7 +54,7 @@ def _test_ptz(cfg) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="porchwatch", description="OBSBOT Tiny 2 auto-tracking security camera")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "probe", "test-ptz"])
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "devices", "probe", "test-ptz"])
     ap.add_argument("-c", "--config", default="config.yaml", help="settings file (created if missing)")
     ap.add_argument("--video", help="run on a video file instead of the camera (testing)")
     ap.add_argument("--no-preview", action="store_true", help="no local window (use the web dashboard)")
@@ -59,6 +71,10 @@ def main() -> None:
         save_config(cfg, args.config)
         logging.info("Created default settings file %s", args.config)
 
+    if args.command == "devices":
+        from .camera import list_devices
+        print(list_devices())
+        return
     if args.command == "probe":
         from .camera import probe
         print(probe(cfg.camera))
