@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,23 +80,61 @@ def model_path(name: str) -> Path:
     return target
 
 
+def tidy_model_files(folder: Path | None = None) -> None:
+    """Older versions let Ultralytics download YOLO weights into the working folder:
+    move them into models/ and remove stale partial downloads."""
+    folder = folder or Path.cwd()
+    for f in folder.glob("yolo*.pt"):
+        target = MODELS_DIR / f.name
+        try:
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                f.unlink()
+            else:
+                shutil.move(str(f), str(target))
+        except OSError as exc:
+            log.warning("Couldn't tidy %s: %s", f.name, exc)
+    for f in folder.glob("yolo*.part"):
+        try:
+            if time.time() - f.stat().st_mtime > 600:       # not a download in progress
+                f.unlink()
+        except OSError:
+            pass
+
+
 class ObjectDetector:
     def __init__(self, cfg: DetectionConfig):
         from ultralytics import YOLO
 
         self.cfg = cfg
+        tidy_model_files()
         # Ultralytics downloads a missing model to exactly this path.
         self.model = YOLO(str(model_path(cfg.model)))
+        self.precision: dict = {}
+        if cfg.fp16 and cfg.device not in ("cpu", "mps"):
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self.precision = {"quantize": 16}   # FP16 (older ultralytics: half=True)
+            except ImportError:
+                pass
 
     def __call__(self, frame: np.ndarray) -> list[Detection]:
         cfg = self.cfg
         classes = [0, *COCO_VEHICLES]
         # No point in upscaling: cap at the frame's long side (multiple of 32).
         imgsz = min(int(cfg.imgsz), (max(frame.shape[:2]) + 31) // 32 * 32)
-        res = self.model.predict(
-            frame, imgsz=imgsz, conf=min(cfg.person_conf, cfg.vehicle_conf),
-            classes=classes, device=cfg.device or None, verbose=False,
-        )[0]
+        kwargs = dict(imgsz=imgsz, conf=min(cfg.person_conf, cfg.vehicle_conf),
+                      classes=classes, device=cfg.device or None, verbose=False, **self.precision)
+        try:
+            res = self.model.predict(frame, **kwargs)[0]
+        except SyntaxError:             # ultralytics too old for `quantize`
+            if self.precision.get("quantize") != 16:
+                raise
+            log.info("Using half=True for FP16 (older ultralytics)")
+            self.precision = {"half": True}
+            kwargs.pop("quantize")
+            res = self.model.predict(frame, **kwargs, half=True)[0]
         dets = []
         for box, conf, cls in zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist(),
                                   res.boxes.cls.tolist()):

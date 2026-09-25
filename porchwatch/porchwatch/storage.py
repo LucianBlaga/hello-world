@@ -323,7 +323,21 @@ def enforce_retention(capture: CaptureConfig, rec: RecordingConfig, protect: Pat
     return removed
 
 
-def disk_usage(path: str) -> dict:
+_usage_cache: dict = {}
+
+
+def disk_usage(path: str, max_age_s: float = 60.0) -> dict:
+    """Space used by `path` and free on its drive. Walking thousands of recordings
+    takes a while, and the dashboard asks every second: cached for a minute."""
+    hit = _usage_cache.get(str(path))
+    if hit and time.time() - hit[0] < max_age_s:
+        return hit[1]
+    result = _disk_usage(path)
+    _usage_cache[str(path)] = (time.time(), result)
+    return result
+
+
+def _disk_usage(path: str) -> dict:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     used = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())

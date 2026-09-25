@@ -38,6 +38,10 @@ SCHEMA = [
          "restart": True, "help": "Tiny 2: 4K up to 30 fps, 1080p up to 60 fps."},
         {"key": "camera.device", "label": "Camera device", "type": "text", "restart": True,
          "help": "Number (0, 1, ...) or, on Windows, a name like OBSBOT Tiny 2. See: python -m porchwatch devices"},
+        {"key": "camera.capture_backend", "label": "Video capture (Windows)", "type": "select",
+         "options": ["dshow", "msmf"], "restart": True,
+         "help": "dshow = DirectShow (default). msmf = Media Foundation with hardware MJPEG decoding: try it if "
+                 "'Camera fps' on the Live page is stuck around 15-20 at 4K. Pan/tilt/zoom work with both."},
         {"key": "camera.ptz_backend", "label": "PTZ control", "type": "select",
          "options": ["auto", "dshow", "opencv", "v4l2", "none"], "restart": True},
         {"key": "camera.home_pan", "label": "Home pan (deg)", "type": "number", "min": -130, "max": 130, "step": 0.5},
@@ -119,9 +123,11 @@ SCHEMA = [
                  "A new model downloads once the first time it's used."},
         {"key": "detection.imgsz", "label": "Detection image size", "type": "select",
          "options": [640, 960, 1280, 1600, 1920, 2560, 3840], "restart": True,
-         "help": "How much of the picture's detail the detector sees. Bigger finds people and cars much further "
-                 "away, but each doubling is ~4x the work - watch Processing fps on the Live page. "
-                 "Never bigger than the capture resolution (it is capped automatically)."},
+         "help": "How much of the picture's detail the detector sees. Bigger finds people and cars further away, "
+                 "but costs a lot: on an RTX A4500 with yolo26m, 1280 runs about twice as fast as 1920. "
+                 "1280 is a good choice at 4K. Capped at the capture resolution."},
+        {"key": "detection.fp16", "label": "Half precision (FP16)", "type": "bool", "restart": True,
+         "help": "NVIDIA GPUs only: about 1.3-1.6x faster detection with practically the same accuracy."},
         {"key": "detection.device", "label": "Compute device", "type": "select", "options": ["", "cpu", "cuda:0", "mps"],
          "restart": True, "help": "Empty = automatic."},
         {"key": "zones", "label": "Zones", "type": "zones",
@@ -428,7 +434,8 @@ def create_app(ctx) -> Flask:
             "patrol": ctx.cfg.patrol.enabled,
             "audio": ({"level_db": round(ctx.audio.level_db, 1)} if getattr(ctx, "audio", None) else None),
             "error": ctx.error,
-            "storage": disk_usage(ctx.cfg.recording.output_dir),
+            "storage": disk_usage(ctx.cfg.recording.output_dir),     # cached: not a disk walk per request
+            "camera_fps": round(getattr(ctx, "camera_fps", 0.0), 1),
             "log": list(ctx.storage.messages)[-30:] if ctx.storage else [],
         })
 
@@ -499,8 +506,13 @@ def create_app(ctx) -> Flask:
                 if problem:
                     return jsonify({"ok": False, "error": f"{label}: {problem}"}), 400
         restart = bool(changed & _restart_keys())
+        # Save first: if the file can't be written (locked by an editor, disk full),
+        # report it and change nothing, rather than failing half-way.
+        try:
+            save_config(new_cfg, ctx.config_path)
+        except OSError as exc:
+            return jsonify({"ok": False, "error": f"Couldn't save settings: {exc}"}), 500
         ctx.apply_config(new_cfg, restart=restart)
-        save_config(new_cfg, ctx.config_path)
         return jsonify({"ok": True, "changed": sorted(changed), "restarted": restart})
 
     @app.post("/api/ptz")

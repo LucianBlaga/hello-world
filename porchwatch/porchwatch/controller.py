@@ -308,9 +308,12 @@ class Controller:
             if self._suppressed(d.kind, pan, tilt, now):
                 continue
             tc = self.cfg.tracking
-            if tr.hits < tc.min_sightings or tr.avg_conf < tc.min_avg_conf:
-                continue                # not seen often / clearly enough yet: could be a ghost
-            if d.kind == PERSON and tr.age(now) >= tc.min_age_s:
+            # Time-based, so it means the same at 12 fps and at 30 fps: seen for at
+            # least `min_age_s`, in a few frames, clearly enough.
+            if (tr.age(now) < tc.min_age_s or tr.hits < tc.min_sightings
+                    or tr.avg_conf < tc.min_avg_conf):
+                continue                # not seen long / clearly enough yet: could be a ghost
+            if d.kind == PERSON:
                 candidates.append((1, d.height, tr))
             elif d.kind == VEHICLE and tr.travel(now, dcfg.motion_window_s) >= dcfg.motion_min_travel * w:
                 candidates.append((2 if tc.prefer_vehicles else 0, d.width, tr))
@@ -597,7 +600,9 @@ class Controller:
         if captured:
             self.last_event = self.storage.save_event(meta, images)
         vp, vt = t.velocity()
-        hold = self.cfg.tracking.recapture_after_s if (t.best_face or t.plate_votes) else 3.0
+        # Same hold whether or not a capture succeeded: a short hold after a failed
+        # chase made the camera swing back to the same person/car again and again.
+        hold = self.cfg.tracking.recapture_after_s
         # Remember where it is NOW (the last clean measurement may be ~1 s old).
         self.recent.append((t.kind, *self._predict(now), vp, vt, now, now + hold))
         self.target = None

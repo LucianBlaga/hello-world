@@ -293,3 +293,67 @@ def test_app_runs_end_to_end_on_a_video(tmp_path, monkeypatch):
     events = app.storage.recent_events()
     assert events and events[0]["kind"] == "person" and "face" in events[0]["files"]
     assert (tmp_path / "logs" / "tracking.log").exists()
+
+
+# ------------------------------------------------------------------ second field audit
+
+def test_failed_chase_is_not_repeated_after_3_seconds(tmp_path):
+    """A chase that captured nothing used to be blocked for only 3 s: the camera kept
+    swinging back to the same person."""
+    from test_controller import Sim, person
+    sim = Sim(tmp_path)
+    sim.ctl.faces = lambda crop: []                 # never finds a face -> chase ends without capture
+    sim.objects.append(person(sim, pan0=-10, speed=0.0))
+    starts = []
+    sim.run(20, lambda s: starts.append(s.ctl.state.value))
+    chases = "".join(x[0] for x in starts).count("wt")
+    assert chases == 1, f"{chases} chases of the same standing person in 20 s"
+
+
+def test_ghost_filter_is_time_based_at_high_frame_rate(tmp_path):
+    """At 30 fps a 0.3 s flicker has 9 sightings - more than a frame-count rule needs."""
+    from test_controller import Sim, person, REAL_GIMBAL
+    from porchwatch.controller import State
+    sim = Sim(tmp_path, **REAL_GIMBAL, fps=30)
+    ghost = person(sim, pan0=-20, speed=0.0)
+    ghost["life"] = 0.3
+    sim.objects.append(ghost)
+    states = []
+    sim.run(2, lambda s: states.append(s.ctl.state))
+    assert State.TRACK not in states
+
+
+def test_settings_not_applied_when_file_cannot_be_saved(tmp_path, monkeypatch):
+    import porchwatch.web as web
+    client, ctx, applied = _client(tmp_path)
+
+    def boom(*a, **k):
+        raise PermissionError("config.yaml is locked")
+    monkeypatch.setattr(web, "save_config", boom)
+    r = client.post("/api/settings", json={"tracking": {"gain": 0.3}})
+    assert r.status_code == 500 and "locked" in r.get_json()["error"]
+    assert not applied
+
+
+def test_status_does_not_walk_the_disk_every_request(tmp_path, monkeypatch):
+    import porchwatch.storage as st
+    calls = []
+    monkeypatch.setattr(st, "_disk_usage", lambda p: calls.append(p) or {"used_gb": 0, "free_gb": 1, "disk_gb": 1})
+    st._usage_cache.clear()
+    for _ in range(5):
+        st.disk_usage(str(tmp_path))
+    assert len(calls) == 1
+
+
+def test_leftover_model_files_are_tidied(tmp_path, monkeypatch):
+    import os
+    import porchwatch.detectors as det
+    monkeypatch.setattr(det, "MODELS_DIR", tmp_path / "models")
+    (tmp_path / "yolo26m.pt").write_bytes(b"weights")
+    stale = tmp_path / "yolo11n.pt.part"
+    stale.write_bytes(b"partial")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    det.tidy_model_files(tmp_path)
+    assert (tmp_path / "models" / "yolo26m.pt").exists()
+    assert not (tmp_path / "yolo26m.pt").exists() and not stale.exists()

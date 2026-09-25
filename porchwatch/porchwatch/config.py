@@ -16,6 +16,10 @@ class CameraConfig:
     width: int = 1920          # 3840x2160 gives much better plate reads, costs CPU/USB.
     height: int = 1080
     fps: int = 30
+    # Windows video capture: "dshow" (DirectShow, default) or "msmf" (Media
+    # Foundation with hardware-accelerated MJPEG decoding: can reach higher fps at
+    # 4K, where software decoding on one CPU core is the limit). Experimental.
+    capture_backend: str = "dshow"
     # "auto" -> DirectShow camera control on Windows (falls back to OpenCV),
     # v4l2 on Linux. "none" disables PTZ.
     ptz_backend: str = "auto"
@@ -51,6 +55,7 @@ class CameraConfig:
 class DetectionConfig:
     model: str = "yolo26n.pt"       # downloaded automatically by ultralytics
     device: str = ""                # "" = auto, "cpu", "cuda:0", "mps"
+    fp16: bool = True               # half precision on NVIDIA GPUs: ~1.3-1.6x faster
     imgsz: int = 640
     person_conf: float = 0.45
     vehicle_conf: float = 0.40
@@ -81,11 +86,12 @@ class TrackingConfig:
     # Lead moving targets by this many seconds (compensates camera latency).
     lead_s: float = 0.2             # extra lead: centres moving targets during the pause
     lost_timeout_s: float = 1.2     # (time spent waiting for the camera to stop doesn't count)
-    # Before chasing, a person / vehicle must have been seen this many times with
-    # at least this average confidence (filters one-frame ghosts).
-    min_sightings: int = 6
+    # Before chasing, a person / vehicle must have been seen for at least
+    # `min_age_s`, in at least `min_sightings` frames, with this average
+    # confidence (filters one-frame ghosts; time-based so it doesn't depend on fps).
+    min_age_s: float = 0.5
+    min_sightings: int = 3
     min_avg_conf: float = 0.5
-    min_age_s: float = 0.5          # ...and for at least this long (people)
     max_track_s: float = 15.0
     # Keep following a person / car until it leaves the picture instead of
     # returning to watch/patrol as soon as a face or plate is captured.

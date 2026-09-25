@@ -79,11 +79,11 @@ Test without the camera: `python -m porchwatch --video some_street_clip.mp4`.
 
 | Section | What you can set |
 |---|---|
-| Camera | device (name or number), capture resolution (up to 4K), capture fps, PTZ backend, home position, camera response delay / turn speed / zoom speed, invert axes |
+| Camera | device (name or number), capture resolution (up to 4K), capture fps, video capture (DirectShow / Media Foundation with hardware decoding), PTZ backend, home position, camera response delay / turn speed / zoom speed, invert axes |
 | Recording | mode (events / continuous / off), record on people, record on moving vehicles, resolution, fps, codec (h264, h265, legacy), encoder (auto/NVIDIA/CPU), compression, pre/post-record, file length, timestamp, folder |
 | Audio | on/off, microphone, boost, rumble/wind filter, noise gate + threshold, limiter, quality, sync offset |
 | Storage | days to keep recordings / snapshots, max GB for recordings, folders |
-| Detection | person / vehicle sensitivity, moving-vehicle threshold, model (YOLO26/YOLO11, n…x), detection image size, CPU/GPU, watch & ignore zones |
+| Detection | person / vehicle sensitivity, moving-vehicle threshold, model (YOLO26/YOLO11, n…x), detection image size, CPU/GPU, half precision (FP16), watch & ignore zones |
 | Tracking | on/off, prioritise vehicles, follow until it leaves (+ time limit), follow speed, lead, face / plate zoom target, time zoomed in, max chase, give-up time, re-capture interval, cool-down |
 | Patrol | on/off, left / right edge, number of stops, look time per stop |
 | Snapshots | min face size, blur filter, plate OCR confidence, plate confirmations, save full scene |
@@ -103,7 +103,9 @@ Less common options are only in `config.yaml`, for example `tracking.min_sightin
 - **Fast cars** get a wider view (less zoom), so the car can't drive out of the picture while the camera catches up.
 - **One camera = one view.** While it follows someone, it doesn't see the rest of the street. A second, fixed wide camera is the usual fix if you need both.
 - **Zoom is digital (up to 4×).** Capture at **3840×2160** for plates and faces. Rough rule: reliable OCR needs a plate ~100+ px wide in the 4K frame, so about ≤ 10–15 m away.
-- **Frame rate matters.** Below ~10 fps the camera gets fewer measurements and follows cars in bigger steps. If *Processing* fps on the Live page is low, lower the detection image size first, then the model size.
+- **Frame rate matters.** Below ~10 fps the camera gets fewer measurements and follows cars in bigger steps. The Live page shows two numbers:
+  - **Camera fps**: what the camera delivers. At 4K, DirectShow decodes each frame on one CPU core, which caps it around 18–25 fps. Try *Settings → Camera → Video capture: msmf* (hardware decoding).
+  - **Processing fps**: detection. With yolo26m on an RTX A4500, detection image size **1280** runs about twice as fast as 1920 and still sees twice the detail of 960. Keep **FP16** on (about 1.3–1.6× faster).
 - **Night:** no infrared, so it needs street or porch lights. Slow night shutter speeds blur anything moving.
 - **Vegas sun:** keep the camera out of direct sun behind the glass, where it can overheat. Turn on HDR in OBSBOT Center before closing it. Tinted/low-E windows add a colour cast and reflections; put the lens right against the glass.
 - **Plates:** Nevada requires front and rear plates, so approaching cars can be read too. Arizona cars (rear plate only) can only be read from behind.

@@ -38,6 +38,7 @@ class App:
         self.latest_jpeg: bytes | None = None       # annotated, for the live view
         self.latest_frame = None                    # newest camera frame (snapshots on demand)
         self.stream_clients = 0                     # browsers watching the live view
+        self.camera_fps = 0.0                       # frames/s the camera delivers
         self.status: dict = {"state": "starting"}
         self.fps = 0.0
         self.error: str | None = None
@@ -274,6 +275,7 @@ class App:
                     else:
                         status = ctl.step(frame, dets, now)
                 self.status = status
+                self.camera_fps = source.fps
                 recorder.feed(frame, now, status["active"], manual=self.manual_rec)
 
                 dt = now - t_prev

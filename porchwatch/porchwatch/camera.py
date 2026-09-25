@@ -58,15 +58,41 @@ def resolve_device(device):
     return device
 
 
+def _msmf_index(device) -> int:
+    """Media Foundation numbers cameras differently from DirectShow (and doesn't
+    list DirectShow-only virtual cameras), so look the camera up by name."""
+    if isinstance(device, int) or str(device).strip().isdigit():
+        log.warning("Media Foundation numbers cameras differently: use the camera's name "
+                    "(e.g. OBSBOT Tiny 2) as Camera device")
+        return int(device)
+    try:
+        from cv2_enumerate_cameras import enumerate_cameras
+    except ImportError as exc:
+        raise RuntimeError("Media Foundation capture needs: python -m pip install cv2-enumerate-cameras") from exc
+    cams = enumerate_cameras(cv2.CAP_MSMF)
+    wanted = str(device).lower()
+    matches = [c for c in cams if wanted in c.name.lower() and "virtual" not in c.name.lower()]
+    if not matches:
+        raise RuntimeError(f"No Media Foundation camera named like {device!r}. Found: {[c.name for c in cams]}")
+    log.info("Media Foundation camera %d: %s", matches[0].index, matches[0].name)
+    return matches[0].index
+
+
 def _open_capture(cfg: CameraConfig) -> cv2.VideoCapture:
-    device = resolve_device(cfg.device)
     system = platform.system()
-    if isinstance(device, int) and system == "Windows":
-        cap = cv2.VideoCapture(device, cv2.CAP_DSHOW)
-    elif system == "Linux":
-        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+    msmf = system == "Windows" and cfg.capture_backend == "msmf"
+    if msmf:
+        # Hardware MJPEG decoding: DirectShow decodes every 4K frame on one CPU core.
+        cap = cv2.VideoCapture(_msmf_index(cfg.device), cv2.CAP_MSMF,
+                               [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
     else:
-        cap = cv2.VideoCapture(device)
+        device = resolve_device(cfg.device)
+        if isinstance(device, int) and system == "Windows":
+            cap = cv2.VideoCapture(device, cv2.CAP_DSHOW)
+        elif system == "Linux":
+            cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        else:
+            cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera {cfg.device!r}")
     # MJPG is required for 1080p/4K at 30 fps over USB.
@@ -78,6 +104,10 @@ def _open_capture(cfg: CameraConfig) -> cv2.VideoCapture:
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     log.info("Camera opened at %dx%d @ %.0f fps", w, h, cap.get(cv2.CAP_PROP_FPS))
+    if msmf:
+        accel = cap.get(cv2.CAP_PROP_HW_ACCELERATION)
+        log.info("Media Foundation hardware decoding: %s",
+                 "on" if accel not in (0, -1, cv2.VIDEO_ACCELERATION_NONE) else "not available")
     if (w, h) != (cfg.width, cfg.height):
         log.warning("Camera refused %dx%d, using %dx%d", cfg.width, cfg.height, w, h)
     return cap
@@ -102,6 +132,8 @@ class FrameSource:
             self._file_delay = 0.0
         self._frame: np.ndarray | None = None
         self._stamp = 0.0
+        self.fps = 0.0                          # frames per second actually delivered by the camera
+        self._fps_count, self._fps_t0 = 0, time.time()
         self._seq = 0
         self._running = True
         self._cond = threading.Condition()
@@ -129,6 +161,10 @@ class FrameSource:
                 self._frame, self._stamp = frame, time.time()
                 self._seq += 1
                 self._cond.notify_all()
+            self._fps_count += 1
+            if self._stamp - self._fps_t0 >= 2.0:
+                self.fps = self._fps_count / (self._stamp - self._fps_t0)
+                self._fps_count, self._fps_t0 = 0, self._stamp
             if self._file_delay:
                 time.sleep(self._file_delay)
         with self._cond:

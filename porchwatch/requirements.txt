@@ -8,3 +8,4 @@ pygrabber>=0.2; sys_platform == "win32"
 sounddevice>=0.4
 imageio-ffmpeg>=0.5
 scipy>=1.10
+cv2-enumerate-cameras>=1.1; sys_platform == "win32"
