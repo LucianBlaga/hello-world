@@ -109,6 +109,8 @@ class RecordingConfig:
     # "events": record only while something is detected/tracked (plus pre/post roll).
     # "continuous": always record. "off": snapshots only.
     mode: str = "events"
+    trigger_people: bool = True     # events mode: record when a person is detected
+    trigger_vehicles: bool = True   # ...when a vehicle is moving (parked cars never trigger)
     width: int = 1280
     height: int = 720
     fps: int = 15

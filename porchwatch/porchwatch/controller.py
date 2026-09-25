@@ -85,6 +85,7 @@ class Controller:
         self.recent: list[tuple] = []   # (kind, pan, tilt, vpan, vtilt, t_end, until)
         self.last_event: dict | None = None
         self.active_until = 0.0         # something of interest in view until this time
+        self._moving_vehicle = False
         self.patrol_idx = 0
         self.patrol_step = 1
         self.dwell_until = 0.0
@@ -157,13 +158,29 @@ class Controller:
     # ------------------------------------------------------------ main step
     def step(self, frame: np.ndarray, dets: list[Detection], now: float | None = None) -> dict:
         now = time.time() if now is None else now
-        if dets:
-            self.active_until = now + 1.0
+        self._moving_vehicle = False
         if self.state == State.HOME:
             self._step_home(frame, dets, now)
         else:
             self._step_track(frame, dets, now)
+        self.note_activity(dets, now)
         return self.status(now)
+
+    def note_activity(self, dets: list[Detection], now: float) -> bool:
+        """Decide whether this frame should (keep) trigger(ing) event recording.
+
+        People and *moving* vehicles count, each only if enabled in the
+        recording settings. Parked cars never do.
+        """
+        rc = self.cfg.recording
+        t = self.target
+        hit = ((rc.trigger_people and any(d.kind == PERSON for d in dets))
+               or (rc.trigger_vehicles and self._moving_vehicle)
+               or (self.state == State.TRACK and t is not None
+                   and (rc.trigger_people if t.kind == PERSON else rc.trigger_vehicles)))
+        if hit:
+            self.active_until = now + 1.0
+        return now < self.active_until
 
     def status(self, now: float) -> dict:
         t = self.target
@@ -174,7 +191,7 @@ class Controller:
             "zoom": round(self.ptz.state.zoom, 2),
             "pan": round(self.ptz.state.pan, 1),
             "tilt": round(self.ptz.state.tilt, 1),
-            "active": self.state == State.TRACK or now < self.active_until,
+            "active": now < self.active_until,
             "last_event": self.last_event,
         }
 
@@ -194,9 +211,12 @@ class Controller:
         if now < self.ptz.moving_until:
             return                      # blurred / shifting view: don't judge motion
         tracks = self.tracker.update(dets, now, w)
+        dcfg = self.cfg.detection
+        self._moving_vehicle = any(
+            tr.det.kind == VEHICLE and tr.travel(now, dcfg.motion_window_s) >= dcfg.motion_min_travel * w
+            for tr in tracks)
         if now < self.cooldown_until:
             return
-        dcfg = self.cfg.detection
         candidates = []
         for tr in tracks:
             d = tr.det

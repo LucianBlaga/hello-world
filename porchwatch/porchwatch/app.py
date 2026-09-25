@@ -228,7 +228,7 @@ class App:
                     dets = detector(frame)
                     if self.paused:
                         status = ctl.status(now)
-                        status["active"] = bool(dets)
+                        status["active"] = ctl.note_activity(dets, now)
                         status["state"] = "paused (manual)"
                     else:
                         status = ctl.step(frame, dets, now)

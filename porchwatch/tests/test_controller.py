@@ -258,3 +258,36 @@ def test_patrol_positions():
     assert ctl.patrol_positions() == [-40, -20, 0, 20, 40]
     cfg.patrol.stops = 1
     assert ctl.patrol_positions() == [0]
+
+
+def _active_after(sim, seconds):
+    states = []
+    sim.run(seconds, lambda s: states.append(s.ctl.status(s.t)["active"]))
+    return states
+
+
+def test_parked_car_never_triggers_recording(tmp_path):
+    sim = Sim(tmp_path)
+    sim.objects.append(car(sim, pan0=10, speed=0.0, label="car", color=(40, 160, 40)))
+    assert not any(_active_after(sim, 5))
+
+
+def test_moving_car_and_person_trigger_recording_only_when_enabled(tmp_path):
+    sim = Sim(tmp_path)
+    sim.cfg.tracking_enabled = False                  # fixed camera, just watching
+    sim.objects.append(car(sim, pan0=-30, speed=8.0, label="car", color=(200, 90, 40)))
+    assert any(_active_after(sim, 3))
+
+    sim = Sim(tmp_path / "b")
+    sim.cfg.tracking_enabled = False
+    sim.cfg.recording.trigger_vehicles = False
+    sim.objects.append(car(sim, pan0=-30, speed=8.0, label="car", color=(200, 90, 40)))
+    assert not any(_active_after(sim, 3))
+
+    sim = Sim(tmp_path / "c")
+    sim.cfg.tracking_enabled = False
+    sim.cfg.recording.trigger_people = False
+    sim.objects.append(person(sim, pan0=0, speed=0.5, dist_deg=20))
+    assert not any(_active_after(sim, 3))
+    sim.cfg.recording.trigger_people = True
+    assert any(_active_after(sim, 1))
