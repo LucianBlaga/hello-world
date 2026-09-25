@@ -47,7 +47,7 @@ class CameraConfig:
 
 @dataclass
 class DetectionConfig:
-    model: str = "yolo11n.pt"       # downloaded automatically by ultralytics
+    model: str = "yolo26n.pt"       # downloaded automatically by ultralytics
     device: str = ""                # "" = auto, "cpu", "cuda:0", "mps"
     imgsz: int = 640
     person_conf: float = 0.45

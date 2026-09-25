@@ -106,8 +106,11 @@ SCHEMA = [
         {"key": "detection.motion_min_travel", "label": "Moving-vehicle threshold", "type": "range", "min": 0.005, "max": 0.1, "step": 0.005,
          "help": "How far (fraction of frame width) a vehicle must move to count as moving. Parked cars are ignored."},
         {"key": "detection.model", "label": "Detection model", "type": "select",
-         "options": ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"], "restart": True,
-         "help": "n = fastest ... x = most accurate. With an NVIDIA GPU, m or l is a good balance."},
+         "options": ["yolo26n.pt", "yolo26s.pt", "yolo26m.pt", "yolo26l.pt", "yolo26x.pt",
+                     "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"], "restart": True,
+         "help": "YOLO26 is the newest generation (better at small, far-away objects); YOLO11 the previous one. "
+                 "n = fastest ... x = most accurate. With an NVIDIA GPU, m or l is a good balance. "
+                 "A new model downloads once the first time it's used."},
         {"key": "detection.imgsz", "label": "Detection image size", "type": "select",
          "options": [640, 960, 1280, 1600, 1920, 2560, 3840], "restart": True,
          "help": "How much of the picture's detail the detector sees. Bigger finds people and cars much further "
