@@ -19,6 +19,8 @@ watching (wide, "home") ──person or moving car──► tracking: centre it,
 
 Needs Python 3.10+. On Windows, install Python from python.org and tick "Add to PATH".
 
+**Windows: keep the folder path short** (for example `C:\PorchWatch`). PyTorch has very long file names, and Windows refuses paths over 260 characters, so installing from a deeply nested folder such as `Desktop\...\hello-world-...\hello-world-...\porchwatch` fails with `No such file or directory ... Long Path`.
+
 ```bash
 cd porchwatch
 python -m venv .venv
