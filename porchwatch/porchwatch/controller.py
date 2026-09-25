@@ -604,23 +604,30 @@ class Controller:
 
 # ------------------------------------------------------------ drawing
 
-def annotate(frame: np.ndarray, dets: list[Detection], ctl: Controller, fps: float) -> np.ndarray:
-    out = frame.copy()
+def annotate(img: np.ndarray, dets: list[Detection], ctl: Controller, fps: float,
+             scale: float = 1.0) -> np.ndarray:
+    """Draw detections and status on a copy of `img`. `scale` maps full-frame box
+    coordinates onto `img` (pass a downscaled frame: drawing on 4K is costly)."""
+    out = img.copy()
     h, w = out.shape[:2]
-    s = max(1.0, w / 1280)
+    s = max(0.6, w / 1280)
+
+    def px(box):
+        return tuple(int(v * scale) for v in box)
+
     for d in dets:
         color = (0, 200, 255) if d.kind == PERSON else (255, 160, 0)
-        x1, y1, x2, y2 = (int(v) for v in d.box)
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, int(2 * s))
+        x1, y1, x2, y2 = px(d.box)
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, max(1, int(2 * s)))
         cv2.putText(out, f"{d.label} {d.conf:.2f}", (x1, max(0, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5 * s, color, int(1 * s) + 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5 * s, color, max(1, int(1 * s)))
     t = ctl.target
     if t is not None:
-        x1, y1, x2, y2 = (int(v) for v in t.det.box)
-        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), int(3 * s))
+        x1, y1, x2, y2 = px(t.det.box)
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), max(1, int(3 * s)))
         if t.feature_box is not None:
-            fx1, fy1, fx2, fy2 = (int(v) for v in t.feature_box)
-            cv2.rectangle(out, (fx1, fy1), (fx2, fy2), (0, 255, 0), int(2 * s))
+            fx1, fy1, fx2, fy2 = px(t.feature_box)
+            cv2.rectangle(out, (fx1, fy1), (fx2, fy2), (0, 255, 0), max(1, int(2 * s)))
     cv2.drawMarker(out, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, int(20 * s), 1)
     st = ctl.ptz.state
     label = "PATROLLING" if ctl.state == State.HOME and ctl.patrolling else ctl.state.value.upper()

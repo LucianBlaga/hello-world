@@ -11,7 +11,10 @@ from pathlib import Path
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 
 from .config import config_to_dict, save_config, update_config
+import cv2
+
 from . import __version__
+from .imaging import downscale
 from .storage import disk_usage
 
 log = logging.getLogger(__name__)
@@ -214,6 +217,7 @@ def _check_writable(folder: str) -> str | None:
 def create_app(ctx) -> Flask:
     """`ctx` is the running porchwatch.app.App instance."""
     app = Flask(__name__, static_folder=None)
+    viewers_lock = threading.Lock()
 
     def auth(fn):
         @functools.wraps(fn)
@@ -238,13 +242,20 @@ def create_app(ctx) -> Flask:
     @auth
     def stream():
         def gen():
-            last = None
-            while True:
-                jpg = ctx.latest_jpeg
-                if jpg is not None and jpg is not last:
-                    last = jpg
-                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-                time.sleep(1.0 / max(1, ctx.cfg.web.stream_fps))
+            # The main loop only encodes live-view frames while someone is watching.
+            with viewers_lock:
+                ctx.stream_clients = getattr(ctx, "stream_clients", 0) + 1
+            try:
+                last = None
+                while True:
+                    jpg = ctx.latest_jpeg
+                    if jpg is not None and jpg is not last:
+                        last = jpg
+                        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+                    time.sleep(1.0 / max(1, ctx.cfg.web.stream_fps))
+            finally:
+                with viewers_lock:
+                    ctx.stream_clients -= 1
         return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
     @app.get("/audio.wav")
@@ -259,10 +270,15 @@ def create_app(ctx) -> Flask:
     @app.get("/snapshot.jpg")
     @auth
     def snapshot():
-        jpg = ctx.latest_raw_jpeg or ctx.latest_jpeg
-        if jpg is None:
+        # Clean picture (no overlay) for drawing zones: made only when asked for.
+        frame = getattr(ctx, "latest_frame", None)
+        if frame is None:
             abort(503)
-        return Response(jpg, mimetype="image/jpeg")
+        small = downscale(frame, ctx.cfg.web.stream_width)
+        ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            abort(503)
+        return Response(jpg.tobytes(), mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/status")
     @auth

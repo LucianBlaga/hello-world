@@ -11,6 +11,7 @@ import cv2
 from .camera import FrameSource, NullPTZ, PTZState, make_ptz
 from .config import Config, config_to_dict, update_config
 from .controller import Controller, annotate
+from .imaging import downscale
 from .storage import Recorder, Storage, enforce_retention
 
 log = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ class App:
 
         self.cfg_lock = threading.Lock()
         self.latest_jpeg: bytes | None = None       # annotated, for the live view
-        self.latest_raw_jpeg: bytes | None = None   # clean, for drawing zones
+        self.latest_frame = None                    # newest camera frame (snapshots on demand)
+        self.stream_clients = 0                     # browsers watching the live view
         self.status: dict = {"state": "starting"}
         self.fps = 0.0
         self.error: str | None = None
@@ -263,17 +265,16 @@ class App:
                 fps = 0.9 * fps + 0.1 * (1.0 / dt) if dt > 0 else fps
                 self.fps = fps
 
+                self.latest_frame = frame   # frames are never modified in place: no copy
                 show = cfg.show_preview and not self.no_preview
-                if now >= next_stream or show:
-                    vis = annotate(frame, dets, ctl, fps)
-                    if now >= next_stream:
+                streaming = self.stream_clients > 0 and now >= next_stream
+                if streaming or show:
+                    # Overlay drawn on a small copy, not on (a copy of) the 4K frame.
+                    small = downscale(frame, cfg.web.stream_width)
+                    vis = annotate(small, dets, ctl, fps, scale=small.shape[1] / frame.shape[1])
+                    if streaming:
                         next_stream = now + 1.0 / max(1, cfg.web.stream_fps)
-                        sw = cfg.web.stream_width
-                        scale = sw / frame.shape[1]
-                        small = cv2.resize(vis, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                        raw = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                        self.latest_jpeg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
-                        self.latest_raw_jpeg = cv2.imencode(".jpg", raw, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+                        self.latest_jpeg = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
                     if show:
                         if not self._show(vis, ptz, ctl):
                             self._quit = True
