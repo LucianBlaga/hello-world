@@ -104,6 +104,7 @@ class Recorder:
         self.segment_started = 0.0
         self.last_active = 0.0
         self.next_frame_t = 0.0
+        self.video_t: float | None = None     # timeline position of the next video frame
         # Pre-roll is kept JPEG-compressed to save memory.
         self.preroll: deque = deque(maxlen=max(1, int(cfg.pre_record_s * cfg.fps) + 1))
         self.q: queue.Queue = queue.Queue(maxsize=120)
@@ -151,7 +152,23 @@ class Recorder:
             log.error("Could not open video writer (codec %s). Try mp4v or MJPG.", cfg.codec)
             return
         self.writer, self.current_file, self.segment_started = writer, path, now
+        self.video_t = None
         log.info("Recording to %s", path)
+
+    def _write(self, frame, t):
+        """Write `frame` for as many frame slots as have passed, so the video
+        plays in real time even when fewer frames arrive than the recording
+        frame rate (e.g. detection running at 17 fps, recording set to 30)."""
+        fps = self.cfg.fps
+        if self.video_t is None:
+            self.video_t = t
+        if t < self.video_t - 0.5 / fps:
+            return                      # ahead of the timeline: drop
+        count = 1 + int((t - self.video_t) * fps)
+        count = min(count, 2 * fps)     # cap freezes after long stalls
+        for _ in range(count):
+            self.writer.write(frame)
+        self.video_t += count / fps
 
     def _close(self):
         if self.writer is not None:
@@ -176,23 +193,23 @@ class Recorder:
                 if not self.writer:
                     self._open(now)
                 if self.writer:
-                    self.writer.write(frame)
+                    self._write(frame, now)
                 continue
             # events mode
             if self.writer is None:
                 if active:
                     self._open(now)
                     if self.writer:
-                        for jpg in self.preroll:
-                            self.writer.write(cv2.imdecode(jpg, cv2.IMREAD_COLOR))
+                        for t_pre, jpg in self.preroll:
+                            self._write(cv2.imdecode(jpg, cv2.IMREAD_COLOR), t_pre)
                     self.preroll.clear()
                 else:
                     ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                     if ok:
-                        self.preroll.append(jpg)
+                        self.preroll.append((now, jpg))
                     continue
             if self.writer:
-                self.writer.write(frame)
+                self._write(frame, now)
                 too_long = now - self.segment_started > cfg.segment_minutes * 60
                 if now - self.last_active > cfg.post_record_s or too_long:
                     self._close()

@@ -120,3 +120,20 @@ def test_web_status_events_and_auth(tmp_path):
     import base64
     hdr = {"Authorization": "Basic " + base64.b64encode(b"admin:s3cret").decode()}
     assert locked.get("/api/status", headers=hdr).status_code == 200
+
+
+def test_recording_plays_in_real_time_when_frames_arrive_slowly(tmp_path):
+    import cv2
+    cfg = Config().recording
+    cfg.output_dir, cfg.mode, cfg.codec = str(tmp_path / "rec"), "continuous", "MJPG"
+    cfg.width, cfg.height, cfg.fps = 320, 180, 30
+    rec = Recorder(cfg)
+    frame = np.zeros((180, 320, 3), np.uint8)
+    t = time.time()
+    for i in range(51):             # frames arrive at 17 fps for 3 s
+        rec.feed(frame, t + i / 17, active=True)
+    rec.close()
+    f = next((tmp_path / "rec").rglob("*.avi"))
+    cap = cv2.VideoCapture(str(f))
+    duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
+    assert 2.8 <= duration <= 3.2, duration
