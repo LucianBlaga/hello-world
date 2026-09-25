@@ -57,7 +57,7 @@ SCHEMA = [
     ]},
     {"title": "Storage", "fields": [
         {"key": "recording.retention_days", "label": "Keep recordings (days)", "type": "number", "min": 0, "max": 365, "step": 1,
-         "help": "0 = forever. Keeping footage of the street only as long as needed is required by privacy law in many countries."},
+         "help": "0 = forever. Old files are deleted automatically."},
         {"key": "recording.max_storage_gb", "label": "Max recordings size (GB)", "type": "number", "min": 0, "max": 10000, "step": 1},
         {"key": "capture.retention_days", "label": "Keep snapshots (days)", "type": "number", "min": 0, "max": 365, "step": 1},
         {"key": "capture.output_dir", "label": "Snapshots folder", "type": "text", "restart": True},

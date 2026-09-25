@@ -84,14 +84,23 @@ Output: `captures/YYYY-MM-DD/*.jpg` plus `captures/events.jsonl` (one JSON line 
 - **One camera = one view.** While it's zoomed on someone, it doesn't see the rest of the street. Chases are kept short (a few seconds) for that reason. A second, fixed wide camera is the usual fix if you need both.
 - **Zoom is digital (up to 4×).** Set capture to **3840×2160** for plates and faces. At 1080p the 4× zoom is mostly upscaling. Rough rule: for reliable OCR a plate needs ~100+ px width in the 4K frame, so about ≤ 10–15 m away.
 - **Fast cars:** the gimbal is quick, but USB control has latency. Cars passing at 50 km/h close to the house cross the view in about a second. Expect plate reads mostly from slower cars, cars turning, or cars approaching head-on. Test with your own street and tune *Lead moving targets* and *Follow speed*.
+- **Vegas sun:** keep the camera out of direct sun behind the glass. The window heats up and the camera will overheat or throttle, so check OBSBOT's operating-temperature spec. Afternoon sun shining into the lens washes out faces, so turn on HDR in OBSBOT Center before closing it. Tinted or low-E windows add a colour cast and reflections.
+- **Plates:** Nevada requires front *and* rear plates, so cars coming toward the house show a plate too. Out-of-state cars (e.g. Arizona, rear plate only) are only readable from behind.
 - **Night:** the Tiny 2 has no infrared, so at night you need street lighting or a porch light. Headlights will glare plates out.
 - **Through a window:** put the lens right against the glass and turn off inside lights, or reflections ruin the image. The Tiny 2 isn't weatherproof, so keep it indoors.
 - **It captures faces, it doesn't identify people.** There is no face recognition. You get dated close-ups you can review or hand to the police.
 - Tracking was developed against a simulated camera. Expect to tune *Follow speed* on real hardware.
 
-## 6. Privacy / legal
+## 6. Privacy / legal (Las Vegas / Nevada)
 
-A camera that records the public street, faces and number plates is regulated in many places. In the EU/UK, filming beyond your own property falls under GDPR (CJEU *Ryneš* ruling). Typically you must have a legitimate reason (e.g. repeated break-ins or vandalism), film no more public space than necessary (use the watch/ignore zones), keep footage only briefly (retention settings), put up a visible sign, and hand footage only to the police. Check your national data-protection authority's guidance before pointing it at the street.
+This is a practical summary, not legal advice.
+
+- **Filming the street from your own property is generally legal in the US.** People on a public street or sidewalk have no reasonable expectation of privacy, and faces and licence plates in public view can be recorded.
+- **Don't aim into private spaces.** Keep neighbours' windows, back yards and pool areas out of the picture. Nevada's voyeurism law (NRS 200.604) is about capturing people in private settings. Use **ignore zones** to mask anything like that.
+- **No audio.** PorchWatch records video only, which keeps you clear of wiretap and eavesdropping rules.
+- **HOA / lease rules** may limit where cameras can go or which way they can point. Check yours if you have one.
+- **Footage use:** giving clips to Las Vegas Metro (LVMPD) for a crime is fine. Posting strangers' faces or plates online invites trouble (defamation, harassment claims). Keep it for evidence.
+- No retention period is required, so pick what suits you in Settings → Storage.
 
 ## Development
 
