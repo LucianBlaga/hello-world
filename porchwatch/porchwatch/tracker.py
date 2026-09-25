@@ -22,20 +22,32 @@ class Track:
     history: deque = field(default_factory=lambda: deque(maxlen=60))   # (t, cx, cy)
     last_seen: float = 0.0
     first_seen: float = 0.0
+    hits: int = 1                       # how many frames it was detected in
+    conf_sum: float = 0.0
+
+    @property
+    def avg_conf(self) -> float:
+        return self.conf_sum / max(1, self.hits)
 
     def travel(self, now: float, window: float) -> float:
-        """Distance (pixels) the centre moved over the last `window` seconds."""
-        pts = [(t, x, y) for t, x, y in self.history if now - t <= window]
-        if len(pts) < 4:
+        """How far (pixels) the centre moves in `window` seconds at its current speed.
+
+        Time-based: at low frame rates the window is stretched (up to 3x) until it
+        holds three sightings, so slow PCs still recognise moving cars.
+        """
+        pts = [p for p in self.history if now - p[0] <= window]
+        if len(pts) < 3:
+            pts = [p for p in self.history if now - p[0] <= 3 * window][-3:]
+        if len(pts) < 3:
             return 0.0                  # too few sightings to tell (noise would look like motion)
+        ts = np.array([p[0] for p in pts]) - pts[0][0]
+        if ts[-1] < 0.25:
+            return 0.0
         # Fit a straight line through the centres: box jitter averages out,
         # steady movement doesn't.
-        ts = np.array([p[0] for p in pts]) - pts[0][0]
-        if ts[-1] <= 0:
-            return 0.0
         vx = np.polyfit(ts, [p[1] for p in pts], 1)[0]
         vy = np.polyfit(ts, [p[2] for p in pts], 1)[0]
-        return float(np.hypot(vx, vy) * ts[-1])
+        return float(np.hypot(vx, vy) * window)
 
     def age(self, now: float) -> float:
         return now - self.first_seen
@@ -71,11 +83,13 @@ class CentroidTracker:
             used_d.add(i)
             tr = self.tracks[tid]
             tr.det, tr.last_seen = dets[i], now
+            tr.hits += 1
+            tr.conf_sum += dets[i].conf
             tr.history.append((now, *dets[i].center))
         for i, d in enumerate(dets):
             if i not in used_d:
                 tid = next(self._ids)
-                tr = Track(tid, d, last_seen=now, first_seen=now)
+                tr = Track(tid, d, last_seen=now, first_seen=now, conf_sum=d.conf)
                 tr.history.append((now, *d.center))
                 self.tracks[tid] = tr
         for tid in [t for t, tr in self.tracks.items() if now - tr.last_seen > self.max_missing_s]:

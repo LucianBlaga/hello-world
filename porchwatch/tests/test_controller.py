@@ -65,9 +65,17 @@ class Sim:
     command and turns at most `slew` deg/s. Rendering uses where the camera really
     points, the controller only knows what it commanded."""
 
-    def __init__(self, tmp_path, latency=0.0, slew=1e9, zoom_rate=1e9, **tracking):
+    def __init__(self, tmp_path, latency=0.0, slew=1e9, zoom_rate=1e9,
+                 fps=FPS, blur=False, drop=0.0, seed=0, **tracking):
+        """`blur`: no detections while the camera turns/zooms fast enough to smear the
+        picture (like YOLO on a real night-time gimbal). `drop`: fraction of frames
+        where the detector finds nothing at all. `fps`: processing rate."""
         self.t = 1000.0
         self.latency, self.slew, self.zoom_rate = latency, slew, zoom_rate
+        self.fps, self.blur, self.drop = fps, blur, drop
+        self.rng = np.random.default_rng(seed)
+        self.cam_speed = 0.0            # deg/s the real camera turned during the last frame
+        self.zoom_speed = 0.0
         self.true = PTZState(0.0, 0.0, 1.0)
         self.cmd_hist = deque([(self.t, PTZState(0.0, 0.0, 1.0))])
         cfg = Config()
@@ -106,9 +114,21 @@ class Sim:
         def toward(a, b, lim):
             return b if abs(b - a) <= lim else a + math.copysign(lim, b - a)
 
+        prev = self.true
         self.true = PTZState(toward(self.true.pan, target.pan, step),
                              toward(self.true.tilt, target.tilt, step),
                              toward(self.true.zoom, target.zoom, self.zoom_rate * dt))
+        self.cam_speed = max(abs(self.true.pan - prev.pan), abs(self.true.tilt - prev.tilt)) / dt
+        self.zoom_speed = abs(self.true.zoom - prev.zoom) / dt
+
+    def blurred(self):
+        """Would a real frame be too smeared to detect anything? Blur length in
+        pixels ~ turn speed x pixels-per-degree x (1/30 s night exposure)."""
+        if not self.blur:
+            return False
+        hf = 2 * math.degrees(math.atan(math.tan(math.radians(self.cfg.camera.hfov_deg / 2)) / self.true.zoom))
+        blur_px = self.cam_speed * (W / hf) / 30.0
+        return blur_px > 4.0 or self.zoom_speed > 0.5
 
     def _background(self):
         """World-fixed texture, so the picture slides when the camera turns."""
@@ -125,6 +145,8 @@ class Sim:
         img = self._background()
         dets = []
         for obj in self.objects:
+            if "life" in obj and self.t - obj["t0"] > obj["life"]:
+                continue                # gone (e.g. a false detection that flickered)
             pan = obj["pan0"] + obj["speed"] * (self.t - obj["t0"])
             half = obj["width"] / 2
             box = self.project(pan - half, obj["top"], pan + half, obj["bottom"])
@@ -139,10 +161,12 @@ class Sim:
                 texture(img, cx - bw * 0.11, box[1] + bh * 0.65, cx + bw * 0.11, box[1] + bh * 0.8, WHITE)
             clipped = (max(0, box[0]), max(0, box[1]), min(W, box[2]), min(H, box[3]))
             dets.append(Detection(obj["kind"], clipped, 0.9, obj["label"]))
+        if self.blurred() or (self.drop and self.rng.random() < self.drop):
+            dets = []
         return img, dets
 
     def run(self, seconds, on_frame=None):
-        for _ in range(int(seconds * FPS)):
+        for _ in range(int(seconds * self.fps)):
             img, dets = self.render()
             self.ctl.step(img, dets, self.t)
             st = self.ptz.state
@@ -151,8 +175,8 @@ class Sim:
                 self.cmd_hist.popleft()
             if on_frame:
                 on_frame(self)
-            self.t += 1.0 / FPS
-            self._advance_camera(1.0 / FPS)
+            self.t += 1.0 / self.fps
+            self._advance_camera(1.0 / self.fps)
 
     def events(self):
         f = self.storage.events_file
@@ -224,7 +248,8 @@ def test_gives_up_when_target_disappears(tmp_path):
     sim.run(0.6)
     assert sim.ctl.state == State.TRACK
     sim.objects.clear()
-    sim.run(sim.cfg.tracking.lost_timeout_s + 0.3)
+    # lost timeout + up to 3 s waiting for the camera to finish a move (doesn't count as lost)
+    sim.run(sim.cfg.tracking.lost_timeout_s + 3.3)
     assert sim.ctl.state == State.HOME
 
 
@@ -367,6 +392,9 @@ def test_follow_until_gone_respects_time_limit(tmp_path):
 
 
 REAL_GIMBAL = dict(latency=0.25, slew=60.0, zoom_rate=2.0)   # what the controller assumes by default
+# What the field shows: ~11 fps at 4K, nothing detected while the gimbal smears the
+# picture, and one frame in five without any detection.
+FIELD = dict(fps=11, blur=True, drop=0.2)
 # The real Tiny 2 may be faster or slower than assumed; tracking must survive both.
 GIMBALS = {
     "as-assumed": REAL_GIMBAL,
@@ -378,7 +406,7 @@ GIMBALS = {
 @pytest.mark.parametrize("gimbal", GIMBALS)
 @pytest.mark.parametrize("speed", [4, 8, 15])
 def test_follows_car_with_real_camera_lag(tmp_path, speed, gimbal):
-    sim = Sim(tmp_path, **GIMBALS[gimbal])
+    sim = Sim(tmp_path, **GIMBALS[gimbal], **FIELD)
     sim.ctl.plates = StrictPlates()
     sim.objects.append(car(sim, pan0=-35, speed=speed, label="car", color=(200, 90, 40)))
     errors, started = [], []
@@ -403,7 +431,7 @@ def test_follows_car_with_real_camera_lag(tmp_path, speed, gimbal):
 
 @pytest.mark.parametrize("gimbal", GIMBALS)
 def test_follows_person_with_real_camera_lag(tmp_path, gimbal):
-    sim = Sim(tmp_path, **GIMBALS[gimbal])
+    sim = Sim(tmp_path, **GIMBALS[gimbal], **FIELD)
     sim.objects.append(person(sim, pan0=-20, speed=1.5))
     errors, started = [], []
 
@@ -422,7 +450,7 @@ def test_follows_person_with_real_camera_lag(tmp_path, gimbal):
 
 @pytest.mark.parametrize("gimbal", GIMBALS)
 def test_stays_on_moving_car_passing_parked_cars(tmp_path, gimbal):
-    sim = Sim(tmp_path, **GIMBALS[gimbal])
+    sim = Sim(tmp_path, **GIMBALS[gimbal], **FIELD)
     sim.ctl.plates = StrictPlates()
     for p in (-12, 6, 22):                                                   # a row of parked cars
         sim.objects.append(car(sim, pan0=p, speed=0.0, label="car", color=(40, 160, 40)))
@@ -446,3 +474,38 @@ def test_stays_on_moving_car_passing_parked_cars(tmp_path, gimbal):
     assert "PARKED1" not in plates, plates
     if errors:
         assert max(errors) < 0.8, f"moving car got {max(errors):.0%} of the way to the edge"
+
+
+
+def test_flickering_false_detection_does_not_start_a_chase(tmp_path):
+    """Field log: a 'person' was chosen and gone on the very next frame."""
+    sim = Sim(tmp_path, **REAL_GIMBAL, fps=11)
+    ghost = person(sim, pan0=-20, speed=0.0)
+    ghost["life"] = 0.45                        # ~5 frames at 11 fps, then nothing
+    sim.objects.append(ghost)
+    states = []
+    sim.run(3, lambda s: states.append(s.ctl.state))
+    assert State.TRACK not in states
+    assert sim.ptz.state.pan == 0.0             # the camera never moved
+
+
+def test_long_first_move_without_detections_is_not_lost(tmp_path):
+    """A slow gimbal turning 35 deg smears every frame for ~2 s: that is not 'lost'."""
+    sim = Sim(tmp_path, latency=0.25, slew=20.0, zoom_rate=2.0, fps=11, blur=True)
+    sim.objects.append(person(sim, pan0=-35, speed=0.0))
+    ends = []
+    orig = sim.ctl._finish
+    sim.ctl._finish = lambda now, reason: (ends.append(reason), orig(now, reason))[1]
+    sim.run(15)
+    assert "lost" not in ends, ends
+    assert any("face" in e["files"] for e in sim.events())
+
+
+@pytest.mark.parametrize("gimbal", GIMBALS)
+@pytest.mark.parametrize("speed", [0.5, 1.5, 3.0])
+def test_person_captured_promptly_in_field_conditions(tmp_path, gimbal, speed):
+    """Field conditions (11 fps, blur, 20% dropped frames): a face within 8 s."""
+    sim = Sim(tmp_path, **GIMBALS[gimbal], **FIELD)
+    sim.objects.append(person(sim, pan0=-30, speed=speed))
+    sim.run(8)
+    assert any("face" in e["files"] for e in sim.events()), "no face within 8 s"

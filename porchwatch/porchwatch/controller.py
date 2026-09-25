@@ -19,6 +19,7 @@ import numpy as np
 from .camera import PTZ, PTZState
 from .config import Config
 from .detectors import PERSON, VEHICLE, Detection, sharpness
+from .imaging import downscale
 from .storage import draw_label
 from .tracker import CentroidTracker
 
@@ -53,6 +54,8 @@ class Target:
     last_seen: float
     world: tuple                                    # (pan, tilt) degrees of aim point
     world_t: float = 0.0                            # when `world` was measured
+    seen_zoom: float = 1.0                          # camera zoom when last seen (for size matching)
+    at_max_zoom_since: float | None = None
     hist: deque = field(default_factory=lambda: deque(maxlen=12))  # (t, pan, tilt)
     zoomed_at: float | None = None
     feature_box: tuple | None = None                # face or plate box, frame coords
@@ -83,34 +86,49 @@ class MotionMeter:
     Our timing model of the gimbal can be wrong; the picture can't.
     """
 
-    def __init__(self, width: int = 192):
+    def __init__(self, width: int = 192, threshold_px: float = 1.0):
         self.width = width
-        self.prev = None
-        self.shift = 0.0            # last whole-scene shift, fraction of frame width
+        self.threshold_px = threshold_px    # shift (px at `width`) that counts as "still moving"
+        self.prev = None                    # previous small grey frame, unmasked
+        self.prev_boxes: list = []
+        self.shift_px = 0.0                 # last whole-scene shift, pixels at `width`
+        self.response = 0.0                 # phase-correlation confidence
+
+    @property
+    def moving(self) -> bool:
+        return self.shift_px > self.threshold_px
 
     def update(self, frame: np.ndarray, ignore_boxes=()) -> float:
         """`ignore_boxes`: people / vehicles, whose own movement must not count."""
         h, w = frame.shape[:2]
-        sh = max(8, int(self.width * h / w))
-        small = cv2.resize(frame, (self.width, sh), interpolation=cv2.INTER_AREA)
+        small = downscale(frame, self.width)
         gray = np.float32(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)) if small.ndim == 3 else np.float32(small)
-        if len(ignore_boxes):
-            fill = float(gray.mean())
-            sx, sy = self.width / w, sh / h
-            for x1, y1, x2, y2 in ignore_boxes:
-                gray[max(0, int(y1 * sy) - 1):int(y2 * sy) + 2, max(0, int(x1 * sx) - 1):int(x2 * sx) + 2] = fill
-        if self.prev is None or self.prev.shape != gray.shape:
-            self.prev, self.shift = gray, 0.0
+        sh = gray.shape[0]
+        sx, sy = self.width / w, sh / h
+        boxes = [(max(0, int(x1 * sx) - 1), max(0, int(y1 * sy) - 1), int(x2 * sx) + 2, int(y2 * sy) + 2)
+                 for x1, y1, x2, y2 in ignore_boxes]
+        prev, prev_boxes = self.prev, self.prev_boxes
+        self.prev, self.prev_boxes = gray, boxes
+        if prev is None or prev.shape != gray.shape:
+            self.shift_px, self.response = 0.0, 0.0
             return 0.0
-        (dx, dy), response = cv2.phaseCorrelate(self.prev, gray)
-        self.prev = gray
+        # Blank the SAME areas (this frame's and the last frame's objects) in both
+        # images; blanking only one frame makes the blank patch itself look like motion.
+        a, b = prev.copy(), gray.copy()
+        fill = float(gray.mean())
+        for x1, y1, x2, y2 in boxes + prev_boxes:
+            a[y1:y2, x1:x2] = fill
+            b[y1:y2, x1:x2] = fill
+        (dx, dy), response = cv2.phaseCorrelate(a, b)
+        self.response = float(response)
         # Low response = no reliable texture (dark / flat picture): assume still.
-        self.shift = float(np.hypot(dx, dy)) / self.width if response > 0.05 else 0.0
-        return self.shift
+        self.shift_px = float(np.hypot(dx, dy)) if response > 0.05 else 0.0
+        return self.shift_px
 
     def reset(self) -> None:
         self.prev = None
-        self.shift = 0.0
+        self.prev_boxes = []
+        self.shift_px = 0.0
 
 
 class Controller:
@@ -130,6 +148,7 @@ class Controller:
         self.last_event: dict | None = None
         self.active_until = 0.0         # something of interest in view until this time
         self._moving_vehicle = False
+        self._person_seen: deque = deque(maxlen=64)   # times of frames with a person in them
         self.motion = MotionMeter()
         self.patrol_idx = 0
         self.patrol_step = 1
@@ -206,8 +225,11 @@ class Controller:
         self.ptz.update_estimate(now)
         if self.ptz_enabled:
             # If the picture still slides, the camera hasn't stopped, whatever the
-            # timing model says: keep waiting (0.4% of the width ~ 0.3 deg at 1x).
-            if self.motion.update(frame, [d.box for d in dets]) > 0.004:
+            # timing model says: keep waiting. The camera only moves when we tell it
+            # to, so sliding long after the model says it stopped is the scene
+            # (trees, headlights), not the camera: then the picture is ignored.
+            self.motion.update(frame, [d.box for d in dets])
+            if self.motion.moving and now <= self.ptz.model_until + 1.5:
                 self.ptz.moving_until = max(self.ptz.moving_until, now + 0.1)
         self._moving_vehicle = False
         if self.state == State.HOME:
@@ -225,7 +247,10 @@ class Controller:
         """
         rc = self.cfg.recording
         t = self.target
-        hit = ((rc.trigger_people and any(d.kind == PERSON for d in dets))
+        if any(d.kind == PERSON for d in dets):
+            self._person_seen.append(now)
+        person_confirmed = sum(1 for ts in self._person_seen if now - ts <= 1.0) >= rc.trigger_frames
+        hit = ((rc.trigger_people and person_confirmed)
                or (rc.trigger_vehicles and self._moving_vehicle)
                or (self.state == State.TRACK and t is not None
                    and (rc.trigger_people if t.kind == PERSON else rc.trigger_vehicles)))
@@ -276,10 +301,13 @@ class Controller:
             pan, tilt = self.img_to_world(*d.center, w, h)
             if self._suppressed(d.kind, pan, tilt, now):
                 continue
-            if d.kind == PERSON and tr.age(now) >= 0.3:
+            tc = self.cfg.tracking
+            if tr.hits < tc.min_sightings or tr.avg_conf < tc.min_avg_conf:
+                continue                # not seen often / clearly enough yet: could be a ghost
+            if d.kind == PERSON and tr.age(now) >= tc.min_age_s:
                 candidates.append((1, d.height, tr))
             elif d.kind == VEHICLE and tr.travel(now, dcfg.motion_window_s) >= dcfg.motion_min_travel * w:
-                candidates.append((2 if self.cfg.tracking.prefer_vehicles else 0, d.width, tr))
+                candidates.append((2 if tc.prefer_vehicles else 0, d.width, tr))
         if not candidates:
             if self.patrolling and now >= self.dwell_until:
                 self._next_stop(now)
@@ -289,7 +317,8 @@ class Controller:
         det = tr.det
         ax, ay = self._aim_point(det, None, h)
         world = self.img_to_world(ax, ay, w, h)
-        self.target = Target(det.kind, det, det.label, now, now, world, world_t=now)
+        self.target = Target(det.kind, det, det.label, now, now, world, world_t=now,
+                             seen_zoom=self.ptz.est.zoom)
         # Seed the velocity estimate with what we saw from home, so moving
         # targets are led from the first command.
         off_x, off_y = ax - det.center[0], ay - det.center[1]
@@ -298,8 +327,10 @@ class Controller:
         self.state = State.TRACK
         self.storage.log(f"Tracking {det.label}")
         vp, vt = self.target.velocity()
-        tlog.info("START %s at pan %.1f tilt %.1f, speed %.1f/%.1f deg/s, camera at pan %.1f zoom %.2f",
-                  det.label, world[0], world[1], vp, vt, self.ptz.est.pan, self.ptz.est.zoom)
+        tlog.info("START %s at pan %.1f tilt %.1f, speed %.1f/%.1f deg/s, camera at pan %.1f zoom %.2f; "
+                  "seen %d times over %.2fs, avg confidence %.2f",
+                  det.label, world[0], world[1], vp, vt, self.ptz.est.pan, self.ptz.est.zoom,
+                  tr.hits, tr.age(now), tr.avg_conf)
 
     # ------------------------------------------------------------ TRACK
     def _aim_point(self, det: Detection, feature_box, h):
@@ -328,6 +359,28 @@ class Controller:
             dist = math.hypot(ax - px, ay - py)
             if dist < best_d:
                 best, best_d = d, dist
+        if best is None:
+            best = self._match_in_picture(dets, w, h)
+            if best is not None:
+                tlog.debug("MATCH by picture fallback (predicted x=%.2f y=%.2f was off)", px / w, py / h)
+        return best
+
+    def _match_in_picture(self, dets, w, h) -> Detection | None:
+        """Fallback when the angle prediction is off (e.g. zoomed in, gimbal estimate
+        a few degrees wrong): a similar-sized box near where the target was last
+        seen, or near the centre, where the camera was just aimed at it."""
+        t = self.target
+        size_scale = self.ptz.est.zoom / max(t.seen_zoom, 1e-3)
+        expected_h = max(1.0, t.det.height * size_scale)
+        lx, ly = t.det.center
+        best, best_score = None, 0.3
+        for d in dets:
+            if d.kind != t.kind or not 0.5 <= d.height / expected_h <= 2.0:
+                continue
+            cx, cy = d.center
+            score = min(math.hypot(cx - lx, cy - ly), math.hypot(cx - w / 2, cy - h / 2)) / w
+            if score < best_score:
+                best, best_score = d, score
         return best
 
     def _step_track(self, frame, dets, now):
@@ -337,10 +390,11 @@ class Controller:
 
         det = self._match(dets, w, h, now)
         if det is None:
-            tlog.debug("NO MATCH (%d detections of other kinds/too far), %.1fs since last seen",
-                       len(dets), now - t.last_seen)
+            tlog.debug("NO MATCH (%d detections), %.1fs since last seen, camera %s, scene shift %.2fpx (resp %.2f)",
+                       len(dets), now - t.last_seen, "moving" if now < self.ptz.moving_until else "still",
+                       self.motion.shift_px, self.motion.response)
         if det is not None:
-            t.det, t.last_seen = det, now
+            t.det, t.last_seen, t.seen_zoom = det, now, self.ptz.est.zoom
             self._analyse(frame, det, now)
             # Stop-and-measure: only trust where things are in the picture once the
             # camera has stopped. While it is still turning, the picture and our idea
@@ -350,17 +404,30 @@ class Controller:
                 ax, ay = self._aim_point(det, t.feature_box, h)
                 t.world, t.world_t = self.img_to_world(ax, ay, w, h), now
                 t.hist.append((now, *t.world))
-                tlog.debug("MEASURE target pan %.1f tilt %.1f (in picture x=%.2f y=%.2f), camera est pan %.1f tilt %.1f zoom %.2f",
-                           *t.world, ax / w, ay / h, self.ptz.est.pan, self.ptz.est.tilt, self.ptz.est.zoom)
+                tlog.debug("MEASURE target pan %.1f tilt %.1f (in picture x=%.2f y=%.2f), camera est pan %.1f "
+                           "tilt %.1f zoom %.2f, scene shift %.2fpx, conf %.2f",
+                           *t.world, ax / w, ay / h, self.ptz.est.pan, self.ptz.est.tilt, self.ptz.est.zoom,
+                           self.motion.shift_px, det.conf)
                 if self.ptz_enabled:
                     self._command(det, ax, ay, w, h, now)
                 elif t.zoomed_at is None:
                     t.zoomed_at = now       # fixed camera: start collecting right away
 
+        # Frames taken while the camera turns are smeared and usually detect nothing:
+        # time spent waiting for the camera (up to 3 s) doesn't count as "lost".
+        busy = 0.0
+        if self.ptz_enabled:
+            busy = min(max(0.0, self.ptz.moving_until - t.last_seen), 3.0)
+        lost = now - t.last_seen > tc.lost_timeout_s + busy
+        if self.ptz.est.zoom >= self.cfg.camera.max_zoom_ratio - 0.05:
+            t.at_max_zoom_since = t.at_max_zoom_since or now
+        else:
+            t.at_max_zoom_since = None
+
         if tc.follow_until_gone:
             # Stay on it until it leaves the picture (or the safety limit), keeping
             # the best face / plate collected along the way.
-            if now - t.last_seen > tc.lost_timeout_s:
+            if lost:
                 return self._finish(now, "left the view")
             if now - t.started > tc.follow_max_s:
                 return self._finish(now, "follow time limit")
@@ -369,7 +436,9 @@ class Controller:
             return self._finish(now, "plate read")
         if t.best_face and t.best_face[0] >= tc.face_fill * h * 0.8:
             return self._finish(now, "face captured")
-        if now - t.last_seen > tc.lost_timeout_s:
+        if t.best_face and t.at_max_zoom_since and now - t.at_max_zoom_since > 1.5:
+            return self._finish(now, "face captured (max zoom)")   # can't get any bigger
+        if lost:
             return self._finish(now, "lost")
         if now - t.started > tc.max_track_s:
             return self._finish(now, "timeout")
@@ -391,7 +460,10 @@ class Controller:
                     + travel / max(cam.pan_speed_dps, 1e-3))
         aim_pan, aim_tilt = goal_pan + vp * lead, goal_tilt + vt * lead
         moving_target = abs(vp) > 2 or abs(vt) > 2
-        gain = 1.0 if moving_target else tc.gain   # damp small corrections on slow targets
+        # Damp only small corrections on slow targets; big errors are corrected in one move.
+        hf, _ = ptz.fov()
+        big_error = max(abs(aim_pan - real.pan), abs(aim_tilt - real.tilt)) > 0.1 * hf
+        gain = 1.0 if (moving_target or big_error) else tc.gain
         new_pan, new_tilt = st.pan, st.tilt
         if abs(err_x) > tc.deadband or moving_target:
             new_pan = real.pan + gain * (aim_pan - real.pan)
@@ -405,13 +477,33 @@ class Controller:
         fill, goal = self._fill(det, w, h)
         if fill is not None and centred:
             ratio = goal / max(fill, 1e-3)
+            # Well centred and slow: zoom up to 2x in one go (fewer wait-for-camera rounds).
+            steady = abs(err_x) < 0.08 and abs(err_y) < 0.08 and math.hypot(vp, vt) <= 6
+            max_step = 2.0 if steady else 1 + tc.zoom_step
             if ratio > 1.1:
-                zoom = real.zoom * min(1 + tc.zoom_step, ratio)
+                zoom = real.zoom * min(max_step, ratio)
             elif ratio < 0.8:
                 zoom = real.zoom * max(1 - tc.zoom_step, ratio)
         # Never zoom so far that the whole vehicle can't be kept in frame.
         if det.kind == VEHICLE and det.width / w > tc.vehicle_fill:
             zoom = min(zoom, real.zoom * tc.vehicle_fill / (det.width / w))
+        if moving_target:
+            speed = math.hypot(vp, vt)
+            if speed > 6:
+                # 1) Fast targets (cars): zoom must not outlast the turn. The camera is
+                #    aimed where the target will be when it ARRIVES; if zooming carries on
+                #    after that, the car drives out of the narrowing picture while the
+                #    camera sits blind.
+                turn_time = cam.ptz_latency_s + travel / max(cam.pan_speed_dps, 1e-3)
+                dz = cam.zoom_speed * max(turn_time, 0.3)
+                zoom = min(max(zoom, real.zoom - dz), real.zoom + dz)
+            # 2) Keep the view wide enough for the time between arriving and the next
+            #    measurement, plus a margin for error in the speed estimate.
+            drift = speed * (cam.ptz_settle_margin_s + 0.2 + 0.2 * lead)
+            need = min(4.0 * drift, cam.hfov_deg)       # target within half of half the view
+            if need > 0:
+                zmax = math.tan(math.radians(cam.hfov_deg / 2)) / math.tan(math.radians(need / 2))
+                zoom = min(zoom, max(1.0, zmax))
         zoom = min(zoom, self.cfg.camera.max_zoom_ratio)
         tlog.debug("COMMAND speed %.1f/%.1f deg/s, lead %.2fs -> pan %.1f tilt %.1f zoom %.2f",
                    vp, vt, lead, new_pan, new_tilt, zoom)
@@ -448,7 +540,7 @@ class Controller:
         if t.best_body is None or body_score > t.best_body[0]:
             t.best_body = (body_score, crop.copy())
             if cc.save_context_frame:
-                t.best_frame = frame.copy()
+                t.best_frame = frame        # frames are never modified in place: no copy needed
 
         t.feature_box = None
         if det.kind == PERSON:

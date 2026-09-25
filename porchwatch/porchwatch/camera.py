@@ -176,6 +176,7 @@ class PTZ:
         self._cmds: deque = deque([(self._est_t, self.state)])
         self._last_cmd = 0.0
         self.moving_until = 0.0     # frames before this time may be motion-blurred
+        self.model_until = 0.0      # when the timing model alone expects the camera to be still
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
@@ -254,6 +255,7 @@ class PTZ:
         settle = (c.ptz_latency_s + travel / max(c.pan_speed_dps, 1e-3)
                   + abs(st.zoom - self.est.zoom) / max(c.zoom_speed, 1e-3) + c.ptz_settle_margin_s)
         self.moving_until = max(self.moving_until, now + settle)
+        self.model_until = max(self.model_until, now + settle)
         return True
 
     def home(self) -> None:

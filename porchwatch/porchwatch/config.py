@@ -78,7 +78,12 @@ class TrackingConfig:
     vehicle_aim_y: float = 0.70
     # Lead moving targets by this many seconds (compensates camera latency).
     lead_s: float = 0.2             # extra lead: centres moving targets during the pause
-    lost_timeout_s: float = 1.2
+    lost_timeout_s: float = 1.2     # (time spent waiting for the camera to stop doesn't count)
+    # Before chasing, a person / vehicle must have been seen this many times with
+    # at least this average confidence (filters one-frame ghosts).
+    min_sightings: int = 6
+    min_avg_conf: float = 0.5
+    min_age_s: float = 0.5          # ...and for at least this long (people)
     max_track_s: float = 15.0
     # Keep following a person / car until it leaves the picture instead of
     # returning to watch/patrol as soon as a face or plate is captured.
@@ -120,6 +125,7 @@ class RecordingConfig:
     mode: str = "events"
     trigger_people: bool = True     # events mode: record when a person is detected
     trigger_vehicles: bool = True   # ...when a vehicle is moving (parked cars never trigger)
+    trigger_frames: int = 3         # sightings within 1 s needed before a person starts a recording
     width: int = 1280
     height: int = 720
     fps: int = 15
