@@ -131,7 +131,7 @@ SCHEMA = [
         {"key": "tracking_enabled", "label": "Auto-tracking (pan/tilt/zoom)", "type": "bool"},
         {"key": "tracking.prefer_vehicles", "label": "Prioritise moving vehicles", "type": "bool"},
         {"key": "tracking.gain", "label": "Follow speed", "type": "range", "min": 0.1, "max": 0.9, "step": 0.05,
-         "help": "Too high makes the camera overshoot and wobble."},
+         "help": "How much of a SMALL correction to make at once on slow targets (big moves are always made in full). Lower = calmer picture."},
         {"key": "tracking.lead_s", "label": "Lead moving targets (s)", "type": "number", "min": 0, "max": 1, "step": 0.05},
         {"key": "tracking.face_fill", "label": "Face zoom target", "type": "range", "min": 0.05, "max": 0.5, "step": 0.01,
          "help": "Face height as a fraction of the picture."},
