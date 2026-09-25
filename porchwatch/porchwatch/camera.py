@@ -15,6 +15,7 @@ import platform
 import shutil
 import subprocess
 import threading
+from collections import deque
 import time
 from dataclasses import dataclass
 
@@ -169,7 +170,10 @@ class PTZ:
     def __init__(self, cfg: CameraConfig, clock=time.time):
         self.cfg = cfg
         self.clock = clock
-        self.state = PTZState(cfg.home_pan, cfg.home_tilt, cfg.home_zoom)
+        self.state = PTZState(cfg.home_pan, cfg.home_tilt, cfg.home_zoom)   # last command
+        self.est = PTZState(cfg.home_pan, cfg.home_tilt, cfg.home_zoom)     # where it really points
+        self._est_t = clock()
+        self._cmds: deque = deque([(self._est_t, self.state)])
         self._last_cmd = 0.0
         self.moving_until = 0.0     # frames before this time may be motion-blurred
 
@@ -197,9 +201,37 @@ class PTZ:
         raw_zoom = self._map(st.zoom, (1.0, c.max_zoom_ratio), c.raw_zoom_range or self.default_raw_zoom)
         return int(round(raw_pan)), int(round(raw_tilt)), int(round(raw_zoom))
 
+    def update_estimate(self, now: float | None = None) -> PTZState:
+        """Advance the model of the real gimbal: it starts moving `ptz_latency_s`
+        after a command, turns at most `pan_speed_dps` and zooms at `zoom_speed`.
+
+        Image positions must be interpreted with where the camera REALLY points;
+        using the last command instead makes fast targets run away.
+        """
+        c = self.cfg
+        now = self.clock() if now is None else now
+        dt = max(0.0, now - self._est_t)
+        self._est_t = now
+        target = self._cmds[0][1]
+        for t_cmd, st in self._cmds:
+            if t_cmd <= now - c.ptz_latency_s:
+                target = st
+        while len(self._cmds) > 1 and self._cmds[1][0] <= now - c.ptz_latency_s:
+            self._cmds.popleft()
+        step = c.pan_speed_dps * dt
+        zstep = c.zoom_speed * dt
+
+        def toward(a, b, lim):
+            return b if abs(b - a) <= lim else a + (lim if b > a else -lim)
+
+        self.est = PTZState(toward(self.est.pan, target.pan, step),
+                            toward(self.est.tilt, target.tilt, step),
+                            toward(self.est.zoom, target.zoom, zstep))
+        return self.est
+
     def fov(self) -> tuple[float, float]:
-        """Current horizontal/vertical field of view in degrees."""
-        z = max(self.state.zoom, 1.0)
+        """Current horizontal/vertical field of view in degrees (at the estimated real zoom)."""
+        z = max(self.est.zoom, 1.0)
         h = 2 * np.degrees(np.arctan(np.tan(np.radians(self.cfg.hfov_deg / 2)) / z))
         v = 2 * np.degrees(np.arctan(np.tan(np.radians(self.cfg.vfov_deg / 2)) / z))
         return float(h), float(v)
@@ -211,20 +243,23 @@ class PTZ:
         if not force and now - self._last_cmd < self.cfg.command_interval_s:
             return False
         st = self.clamp(st)
-        prev = self.state
+        self.update_estimate(now)
         self._send(*self.to_raw(st))
         self.state = st
         self._last_cmd = now
-        # Rough settle time: gimbal ~120 deg/s plus fixed latency.
-        travel = max(abs(st.pan - prev.pan), abs(st.tilt - prev.tilt))
-        settle = 0.08 + travel / 120.0 + (0.15 if st.zoom != prev.zoom else 0.0)
+        self._cmds.append((now, st))
+        # When the real camera will have arrived, per the same model.
+        c = self.cfg
+        travel = max(abs(st.pan - self.est.pan), abs(st.tilt - self.est.tilt))
+        settle = (c.ptz_latency_s + travel / max(c.pan_speed_dps, 1e-3)
+                  + abs(st.zoom - self.est.zoom) / max(c.zoom_speed, 1e-3) + c.ptz_settle_margin_s)
         self.moving_until = max(self.moving_until, now + settle)
         return True
 
     def home(self) -> None:
         c = self.cfg
         self.move(PTZState(c.home_pan, c.home_tilt, c.home_zoom), force=True)
-        self.moving_until = self.clock() + 1.5
+        self.moving_until += 0.3
 
     def _send(self, pan: int, tilt: int, zoom: int) -> None:
         raise NotImplementedError

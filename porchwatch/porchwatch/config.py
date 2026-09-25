@@ -36,6 +36,11 @@ class CameraConfig:
     home_pan: float = 0.0
     home_tilt: float = 0.0
     home_zoom: float = 1.0
+    # How the real gimbal responds (used to know where it points while moving):
+    ptz_latency_s: float = 0.25     # delay before it starts moving after a command
+    pan_speed_dps: float = 60.0     # turning speed, degrees per second
+    zoom_speed: float = 2.0         # zoom ratio change per second (1x -> 3x takes 1 s)
+    ptz_settle_margin_s: float = 0.15   # extra wait before trusting the picture after a move
     # Minimum seconds between PTZ commands (UVC control transfers are slow).
     command_interval_s: float = 0.08
 
@@ -72,7 +77,7 @@ class TrackingConfig:
     person_aim_y: float = 0.10
     vehicle_aim_y: float = 0.70
     # Lead moving targets by this many seconds (compensates camera latency).
-    lead_s: float = 0.25
+    lead_s: float = 0.2             # extra lead: centres moving targets during the pause
     lost_timeout_s: float = 1.2
     max_track_s: float = 15.0
     # Keep following a person / car until it leaves the picture instead of

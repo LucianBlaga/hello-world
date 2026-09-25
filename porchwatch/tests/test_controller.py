@@ -2,12 +2,14 @@
 camera's pan/tilt/zoom decides where they appear, and the controller has to
 follow, zoom in, capture and return home."""
 import json
+import math
+from collections import deque
 
 import cv2
 import numpy as np
 import pytest
 
-from porchwatch.camera import NullPTZ
+from porchwatch.camera import NullPTZ, PTZState
 from porchwatch.config import Config
 from porchwatch.controller import Controller, State
 from porchwatch.detectors import PERSON, VEHICLE, Detection, PlateRead
@@ -59,8 +61,15 @@ class FakePlates:
 
 
 class Sim:
-    def __init__(self, tmp_path, **tracking):
+    """`latency` / `slew` model the real gimbal: it starts moving `latency` s after a
+    command and turns at most `slew` deg/s. Rendering uses where the camera really
+    points, the controller only knows what it commanded."""
+
+    def __init__(self, tmp_path, latency=0.0, slew=1e9, zoom_rate=1e9, **tracking):
         self.t = 1000.0
+        self.latency, self.slew, self.zoom_rate = latency, slew, zoom_rate
+        self.true = PTZState(0.0, 0.0, 1.0)
+        self.cmd_hist = deque([(self.t, PTZState(0.0, 0.0, 1.0))])
         cfg = Config()
         cfg.camera.command_interval_s = 0.0
         cfg.capture.output_dir = str(tmp_path / "captures")
@@ -74,13 +83,46 @@ class Sim:
         self.ctl = Controller(cfg, self.ptz, FakeFaces(), FakePlates(), self.storage, ptz_enabled=True)
         self.objects = []
 
+    def _true_to_img(self, pan, tilt):
+        st = self.true
+        hf = 2 * math.degrees(math.atan(math.tan(math.radians(self.cfg.camera.hfov_deg / 2)) / st.zoom))
+        vf = 2 * math.degrees(math.atan(math.tan(math.radians(self.cfg.camera.vfov_deg / 2)) / st.zoom))
+        dx = math.tan(math.radians(pan - st.pan)) / math.tan(math.radians(hf / 2))
+        dy = math.tan(math.radians(st.tilt - tilt)) / math.tan(math.radians(vf / 2))
+        return W / 2 + dx * W / 2, H / 2 + dy * H / 2
+
     def project(self, pan1, tilt_top, pan2, tilt_bottom):
-        x1, y1 = self.ctl.world_to_img(pan1, tilt_top, W, H)
-        x2, y2 = self.ctl.world_to_img(pan2, tilt_bottom, W, H)
+        x1, y1 = self._true_to_img(pan1, tilt_top)
+        x2, y2 = self._true_to_img(pan2, tilt_bottom)
         return x1, y1, x2, y2
 
+    def _advance_camera(self, dt):
+        target = self.cmd_hist[0][1]
+        for t_cmd, st in self.cmd_hist:
+            if t_cmd <= self.t - self.latency:
+                target = st
+        step = self.slew * dt
+
+        def toward(a, b, lim):
+            return b if abs(b - a) <= lim else a + math.copysign(lim, b - a)
+
+        self.true = PTZState(toward(self.true.pan, target.pan, step),
+                             toward(self.true.tilt, target.tilt, step),
+                             toward(self.true.zoom, target.zoom, self.zoom_rate * dt))
+
+    def _background(self):
+        """World-fixed texture, so the picture slides when the camera turns."""
+        st = self.true
+        hf = 2 * math.degrees(math.atan(math.tan(math.radians(self.cfg.camera.hfov_deg / 2)) / st.zoom))
+        vf = 2 * math.degrees(math.atan(math.tan(math.radians(self.cfg.camera.vfov_deg / 2)) / st.zoom))
+        xs = st.pan + np.degrees(np.arctan((np.arange(W) - W / 2) / (W / 2) * math.tan(math.radians(hf / 2))))
+        ys = st.tilt - np.degrees(np.arctan((np.arange(H) - H / 2) / (H / 2) * math.tan(math.radians(vf / 2))))
+        tex = (np.sin(xs[None, :] * 2.1) * np.cos(ys[:, None] * 1.7) + np.sin(xs[None, :] * 0.37 + ys[:, None] * 0.53))
+        g = (40 + 10 * tex).astype(np.uint8)
+        return np.dstack([g, g, g])
+
     def render(self):
-        img = np.full((H, W, 3), 40, np.uint8)
+        img = self._background()
         dets = []
         for obj in self.objects:
             pan = obj["pan0"] + obj["speed"] * (self.t - obj["t0"])
@@ -103,9 +145,14 @@ class Sim:
         for _ in range(int(seconds * FPS)):
             img, dets = self.render()
             self.ctl.step(img, dets, self.t)
+            st = self.ptz.state
+            self.cmd_hist.append((self.t, PTZState(st.pan, st.tilt, st.zoom)))
+            while len(self.cmd_hist) > 2 and self.cmd_hist[1][0] <= self.t - self.latency - 1:
+                self.cmd_hist.popleft()
             if on_frame:
                 on_frame(self)
             self.t += 1.0 / FPS
+            self._advance_camera(1.0 / FPS)
 
     def events(self):
         f = self.storage.events_file
@@ -317,3 +364,57 @@ def test_follow_until_gone_respects_time_limit(tmp_path):
     sim.objects.append(person(sim, pan0=0, speed=0.0))
     sim.run(8)
     assert [e["reason"] for e in sim.events()] == ["follow time limit"]
+
+
+REAL_GIMBAL = dict(latency=0.25, slew=60.0, zoom_rate=2.0)   # what the controller assumes by default
+# The real Tiny 2 may be faster or slower than assumed; tracking must survive both.
+GIMBALS = {
+    "as-assumed": REAL_GIMBAL,
+    "faster": dict(latency=0.1, slew=150.0, zoom_rate=5.0),
+    "slower": dict(latency=0.45, slew=35.0, zoom_rate=1.0),
+}
+
+
+@pytest.mark.parametrize("gimbal", GIMBALS)
+@pytest.mark.parametrize("speed", [4, 8, 15])
+def test_follows_car_with_real_camera_lag(tmp_path, speed, gimbal):
+    sim = Sim(tmp_path, **GIMBALS[gimbal])
+    sim.ctl.plates = StrictPlates()
+    sim.objects.append(car(sim, pan0=-35, speed=speed, label="car", color=(200, 90, 40)))
+    errors, started = [], []
+
+    def watch(s):
+        if s.ctl.state == State.TRACK:
+            started.append(s.t)
+            if s.t - started[0] > 1.5:                 # after the camera had time to get there
+                obj = s.objects[0]
+                pan = obj["pan0"] + obj["speed"] * (s.t - obj["t0"])
+                half_view = math.degrees(math.atan(math.tan(math.radians(s.cfg.camera.hfov_deg / 2)) / s.true.zoom))
+                # how far off-centre the car REALLY is, as a fraction of half the picture
+                errors.append(abs(pan - s.true.pan) / half_view)
+        else:
+            started.clear()
+
+    sim.run(10, watch)
+    assert [e.get("plate") for e in sim.events()] == ["MOVING1"]
+    if errors:                                         # (fast plate reads may end the chase sooner)
+        assert max(errors) < 0.8, f"car got {max(errors):.0%} of the way to the picture edge"
+
+
+@pytest.mark.parametrize("gimbal", GIMBALS)
+def test_follows_person_with_real_camera_lag(tmp_path, gimbal):
+    sim = Sim(tmp_path, **GIMBALS[gimbal])
+    sim.objects.append(person(sim, pan0=-20, speed=1.5))
+    errors, started = [], []
+
+    def watch(s):
+        if s.ctl.state == State.TRACK:
+            started.append(s.t)
+            if s.t - started[0] > 1.5:
+                half_view = math.degrees(math.atan(math.tan(math.radians(s.cfg.camera.hfov_deg / 2)) / s.true.zoom))
+                errors.append(abs(s.objects[0]["pan0"] + 1.5 * (s.t - s.objects[0]["t0"]) - s.true.pan) / half_view)
+
+    sim.run(12, watch)
+    assert errors and max(errors) < 0.6, f"person got {max(errors):.0%} of the way to the picture edge"
+    ev = sim.events()
+    assert len(ev) == 1 and "face" in ev[0]["files"]
