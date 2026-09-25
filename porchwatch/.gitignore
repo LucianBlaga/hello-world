@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+config.yaml
+config.yaml.tmp
+captures/
+recordings/
+models/
+*.pt
+.venv/
