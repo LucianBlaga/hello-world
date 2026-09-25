@@ -435,4 +435,13 @@ def list_devices() -> str:
         lines.append(f"  {i}: {name}  ->  {ptz}")
     lines.append("")
     lines.append("Put the right one in Settings > Camera device (number or name, e.g. OBSBOT Tiny 2).")
+    try:
+        from .audio import list_input_devices
+        mics = sorted({name for _, name, _ in list_input_devices()})
+        lines.append("")
+        lines.append("Microphones:")
+        lines.extend(f"  {m}" for m in mics)
+        lines.append("Settings > Audio > Microphone takes part of a name, e.g. OBSBOT.")
+    except Exception as exc:
+        lines.append(f"(microphones: {exc})")
     return "\n".join(lines)

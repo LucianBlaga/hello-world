@@ -95,8 +95,11 @@ class Recorder:
                        after activity ends.
     """
 
-    def __init__(self, cfg: RecordingConfig):
+    def __init__(self, cfg: RecordingConfig, audio=None, audio_bitrate_kbps: int = 128):
         self.cfg = cfg
+        self.audio = audio                    # porchwatch.audio.AudioSource or None
+        self.audio_bitrate_kbps = audio_bitrate_kbps
+        self._mux_threads: list[threading.Thread] = []
         self.root = Path(cfg.output_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self.writer: cv2.VideoWriter | None = None
@@ -162,6 +165,8 @@ class Recorder:
         fps = self.cfg.fps
         if self.video_t is None:
             self.video_t = t
+            if self.audio is not None:          # audio file starts at the first video frame
+                self.audio.start_recording(self.current_file.with_suffix(".wav"), t)
         if t < self.video_t - 0.5 / fps:
             return                      # ahead of the timeline: drop
         count = 1 + int((t - self.video_t) * fps)
@@ -174,6 +179,14 @@ class Recorder:
         if self.writer is not None:
             self.writer.release()
             log.info("Finished %s", self.current_file)
+            wav = self.audio.stop_recording() if self.audio is not None else None
+            if wav is not None and wav.exists():
+                from .audio import mux_audio
+
+                th = threading.Thread(target=mux_audio, name="mux",
+                                      args=(self.current_file, wav, self.audio_bitrate_kbps))
+                th.start()
+                self._mux_threads.append(th)
         self.writer = None
         self.current_file = None
 
@@ -218,9 +231,14 @@ class Recorder:
     def close(self):
         self._running = False
         self._thread.join(timeout=10)
+        for th in self._mux_threads:            # let the last file get its audio
+            th.join(timeout=60)
 
 
 # ------------------------------------------------------------------ retention
+
+VIDEO_SUFFIXES = {".mp4", ".avi", ".mkv"}
+
 
 def _dir_files(root: Path, suffixes) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
@@ -231,7 +249,7 @@ def enforce_retention(capture: CaptureConfig, rec: RecordingConfig, protect: Pat
     removed = 0
     now = time.time()
     for root, days, suffixes in ((Path(capture.output_dir), capture.retention_days, {".jpg"}),
-                                 (Path(rec.output_dir), rec.retention_days, {".mp4", ".avi"})):
+                                 (Path(rec.output_dir), rec.retention_days, VIDEO_SUFFIXES | {".wav"})):
         if not root.exists() or days <= 0:
             continue
         for p in _dir_files(root, suffixes):
@@ -240,7 +258,7 @@ def enforce_retention(capture: CaptureConfig, rec: RecordingConfig, protect: Pat
                 removed += 1
     root = Path(rec.output_dir)
     if rec.max_storage_gb > 0 and root.exists():
-        files = sorted(_dir_files(root, {".mp4", ".avi"}), key=lambda p: p.stat().st_mtime)
+        files = sorted(_dir_files(root, VIDEO_SUFFIXES | {".wav"}), key=lambda p: p.stat().st_mtime)
         total = sum(p.stat().st_size for p in files)
         limit = rec.max_storage_gb * 1024 ** 3
         for p in files:

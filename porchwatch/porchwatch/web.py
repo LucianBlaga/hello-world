@@ -56,6 +56,25 @@ SCHEMA = [
         {"key": "recording.output_dir", "label": "Recordings folder", "type": "text", "restart": True,
          "help": "Full path, e.g. D:\\PorchWatch\\recordings to record to another drive. Created if missing."},
     ]},
+    {"title": "Audio", "fields": [
+        {"key": "audio.enabled", "label": "Record audio", "type": "bool", "restart": True,
+         "help": "Records the camera microphone into the videos and enables Listen on the Live page. "
+                 "Check local law before recording conversations (Nevada: NRS 200.650)."},
+        {"key": "audio.device", "label": "Microphone", "type": "text", "restart": True,
+         "help": "Part of the name, e.g. OBSBOT. Empty = Windows default microphone. See: python -m porchwatch devices"},
+        {"key": "audio.gain_db", "label": "Boost (dB)", "type": "range", "min": 0, "max": 36, "step": 1,
+         "help": "Amplifies quiet sounds. +12 dB is 4x louder. The limiter stops loud sounds from distorting."},
+        {"key": "audio.high_pass_hz", "label": "Rumble / wind filter", "type": "select", "options": [0, 80, 120, 200, 300],
+         "help": "Cuts low frequencies (Hz). 0 = off. 120-200 removes most wind and traffic rumble, keeps voices."},
+        {"key": "audio.noise_gate", "label": "Noise gate", "type": "bool",
+         "help": "Turns the background hiss down between sounds (useful with a big boost)."},
+        {"key": "audio.gate_threshold_db", "label": "Gate threshold (dB)", "type": "range", "min": -80, "max": -20, "step": 1,
+         "help": "Sounds quieter than this are turned down. Watch the level meter on the Live page."},
+        {"key": "audio.limiter", "label": "Limiter", "type": "bool"},
+        {"key": "audio.bitrate_kbps", "label": "Audio quality (kbps)", "type": "select", "options": [64, 96, 128, 192, 256]},
+        {"key": "audio.sync_offset_ms", "label": "Audio sync offset (ms)", "type": "number", "min": -1000, "max": 1000, "step": 10,
+         "help": "If sound comes before the picture, increase this; if after, decrease."},
+    ]},
     {"title": "Storage", "fields": [
         {"key": "recording.retention_days", "label": "Keep recordings (days)", "type": "number", "min": 0, "max": 365, "step": 1,
          "help": "0 = forever. Old files are deleted automatically."},
@@ -197,6 +216,15 @@ def create_app(ctx) -> Flask:
                 time.sleep(1.0 / max(1, ctx.cfg.web.stream_fps))
         return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
+    @app.get("/audio.wav")
+    @auth
+    def audio_stream():
+        src = getattr(ctx, "audio", None)
+        if src is None:
+            abort(404)
+        return Response(src.listen(), mimetype="audio/wav",
+                        headers={"Cache-Control": "no-store"})
+
     @app.get("/snapshot.jpg")
     @auth
     def snapshot():
@@ -216,6 +244,7 @@ def create_app(ctx) -> Flask:
             "recording_file": str(rec.current_file) if rec and rec.current_file else None,
             "paused": ctx.paused,
             "patrol": ctx.cfg.patrol.enabled,
+            "audio": ({"level_db": round(ctx.audio.level_db, 1)} if getattr(ctx, "audio", None) else None),
             "error": ctx.error,
             "storage": disk_usage(ctx.cfg.recording.output_dir),
             "log": list(ctx.storage.messages)[-30:] if ctx.storage else [],
@@ -235,7 +264,8 @@ def create_app(ctx) -> Flask:
     @auth
     def recordings():
         root = Path(ctx.cfg.recording.output_dir)
-        files = sorted((f for f in root.rglob("*") if f.suffix in (".mp4", ".avi")),
+        files = sorted((f for f in root.rglob("*") if f.suffix.lower() in (".mp4", ".avi", ".mkv")
+                        and ".muxing" not in f.name),
                        key=lambda f: f.stat().st_mtime, reverse=True)[:200] if root.exists() else []
         return jsonify([{"path": f.relative_to(root).as_posix(), "size_mb": round(f.stat().st_size / 1e6, 1),
                          "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f.stat().st_mtime))}

@@ -42,6 +42,7 @@ class App:
         self.paused = False
         self.storage: Storage | None = None
         self.recorder: Recorder | None = None
+        self.audio = None                           # AudioSource while audio is enabled
         self.controller: Controller | None = None
         self.ptz = None
         self._restart = False
@@ -196,7 +197,14 @@ class App:
             self.controller = ctl
             if ctl.ptz_enabled:
                 ptz.home()
-            recorder = Recorder(cfg.recording)
+            if cfg.audio.enabled:
+                try:
+                    from .audio import AudioSource
+                    self.audio = AudioSource(cfg.audio, keep_s=cfg.recording.pre_record_s)
+                except Exception as exc:
+                    log.error("Audio disabled: %s", exc)
+                    self.storage.log(f"Audio unavailable: {exc}")
+            recorder = Recorder(cfg.recording, audio=self.audio, audio_bitrate_kbps=cfg.audio.bitrate_kbps)
             self.recorder = recorder
             self.storage.log(f"Started ({'video file' if self.video else 'camera'}, "
                              f"PTZ {'on' if ctl.ptz_enabled else 'off'}, recording {cfg.recording.mode})")
@@ -249,6 +257,9 @@ class App:
         finally:
             if recorder:
                 recorder.close()
+            if self.audio is not None:
+                self.audio.close()
+                self.audio = None
             source.close()
 
     def _show(self, vis, ptz, ctl) -> bool:

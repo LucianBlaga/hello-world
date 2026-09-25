@@ -143,6 +143,18 @@
           </div>
           <p class="muted" style="font-size:12px; margin:8px 0 0">Moving the camera manually pauses auto-tracking. Press Home to resume.</p>
         </div>
+        <div class="card" id="audiocard" style="display:none">
+          <h2>Audio</h2>
+          <div style="display:flex; align-items:center; gap:10px">
+            <div style="flex:1; height:10px; background:var(--panel-2); border-radius:5px; overflow:hidden">
+              <div id="meter" style="height:100%; width:0; background:var(--ok); transition:width .15s"></div>
+            </div>
+            <span id="meterdb" class="muted" style="font-size:12px; min-width:56px; text-align:right">—</span>
+          </div>
+          <button class="btn small" id="listenbtn" style="margin-top:10px">▶ Listen live</button>
+          <audio id="player" preload="none"></audio>
+          <p class="muted" style="font-size:12px; margin:8px 0 0">Live audio lags a second or two behind the picture.</p>
+        </div>
         <div class="card"><h2>Activity</h2><div class="log" id="log"></div></div>
       </div>
     </div>
@@ -207,6 +219,13 @@ async function refreshStatus() {
   try {
     const s = await api("api/status");
     paused = s.paused;
+    $("#audiocard").style.display = s.audio ? "block" : "none";
+    if (s.audio) {
+      const db = s.audio.level_db, pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+      $("#meter").style.width = pct + "%";
+      $("#meter").style.background = db > -3 ? "var(--rec)" : db > -12 ? "var(--warn)" : "var(--ok)";
+      $("#meterdb").textContent = db <= -100 ? "silent" : db.toFixed(0) + " dB";
+    }
     if (document.activeElement !== $("#patrolchk")) $("#patrolchk").checked = !!s.patrol;
     $("#pausebtn").textContent = paused ? "Resume tracking" : "Pause tracking";
     $("#recdot").classList.toggle("rec", s.recording);
@@ -231,6 +250,11 @@ $("#patrolchk").onchange = async e => {
   const r = await post("api/settings", { patrol: { enabled: on } });
   if (r.ok) { if (on && paused) await post("api/ptz", { action: "home" }); toast(on ? "Patrol on" : "Patrol off"); }
   else { e.target.checked = !on; toast("Error: " + r.error); }
+};
+$("#listenbtn").onclick = () => {
+  const p = $("#player");
+  if (p.paused || !p.src) { p.src = "audio.wav?" + Date.now(); p.play(); $("#listenbtn").textContent = "■ Stop listening"; }
+  else { p.pause(); p.removeAttribute("src"); p.load(); $("#listenbtn").textContent = "▶ Listen live"; }
 };
 $("#pausebtn").onclick = () => post("api/pause", { paused: !paused }).then(refreshStatus);
 

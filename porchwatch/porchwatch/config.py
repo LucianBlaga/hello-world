@@ -123,6 +123,21 @@ class RecordingConfig:
 
 
 @dataclass
+class AudioConfig:
+    enabled: bool = False
+    # Part of the microphone name (e.g. "OBSBOT"), an index, or "" for the system default.
+    device: Any = "OBSBOT"
+    sample_rate: int = 48000
+    gain_db: float = 12.0           # boost; the limiter keeps loud sounds from distorting
+    high_pass_hz: int = 120         # cut wind / traffic rumble below this; 0 = off
+    noise_gate: bool = False        # quiet the background hiss between sounds
+    gate_threshold_db: float = -50.0
+    limiter: bool = True
+    bitrate_kbps: int = 128
+    sync_offset_ms: int = 0         # shift audio later (+) or earlier (-) if lips don't match
+
+
+@dataclass
 class WebConfig:
     enabled: bool = True
     # 127.0.0.1 = only this computer. Use 0.0.0.0 to reach it from your phone
@@ -143,6 +158,7 @@ class Config:
     patrol: PatrolConfig = field(default_factory=PatrolConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
     web: WebConfig = field(default_factory=WebConfig)
     tracking_enabled: bool = True   # False = fixed camera, detection + recording only
     show_preview: bool = True       # local OpenCV window
