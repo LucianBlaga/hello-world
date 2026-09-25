@@ -136,9 +136,25 @@ def test_recorder_memory_is_bounded_when_encoder_stalls(tmp_path):
     rec._thread.join(timeout=5)
     big = np.zeros((2160, 3840, 3), np.uint8)
     t = time.time()
-    for i in range(200):
+    for i in range(400):
         rec.feed(big, t + i / 30, active=True)
-    assert rec.q.qsize() <= 12          # ~300 MB of 4K frames at most, not 200 x 25 MB
+    held = sum(item[0].nbytes for item in list(rec.q.queue))
+    assert held <= 620e6                # bounded (~600 MB), not 400 x 25 MB of 4K frames
+    assert rec.q.qsize() <= cfg.fps * 3 # at most ~3 s of frames
+
+
+def test_recorder_shrinks_frames_before_queueing(tmp_path):
+    cfg = Config().recording
+    cfg.output_dir, cfg.mode, cfg.codec, cfg.fps = str(tmp_path), "continuous", "MJPG", 30
+    cfg.width, cfg.height = 1920, 1080
+    rec = Recorder(cfg)
+    rec._running = False
+    rec._thread.join(timeout=5)
+    t = time.time()
+    for i in range(60):                 # 2 s of 4K at 30 fps while the recorder is stuck
+        rec.feed(np.zeros((2160, 3840, 3), np.uint8), t + i / 30, active=True)
+    assert rec.q.qsize() == 60          # nothing dropped: a 2 s stall is absorbed
+    assert rec.q.queue[0][0].shape == (1080, 1920, 3)
 
 
 def test_failing_encoder_reports_and_does_not_hang(tmp_path):

@@ -82,6 +82,17 @@ def draw_label(img: np.ndarray, text: str, org: tuple, scale: float) -> None:
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thick, cv2.LINE_AA)
 
 
+def fit_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Resize to exactly width x height, fast: OpenCV's area filter has a quick path
+    for exact 2x; other big reductions are point-sampled to 2x first."""
+    h, w = frame.shape[:2]
+    if (w, h) == (width, height):
+        return frame
+    if w > 2 * width and h > 2 * height:
+        frame = cv2.resize(frame, (width * 2, height * 2), interpolation=cv2.INTER_NEAREST)
+    return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+
+
 def _codec_ext(codec: str) -> str:
     return ".avi" if codec.upper() in ("MJPG", "XVID", "DIVX") else ".mp4"
 
@@ -145,7 +156,11 @@ class Recorder:
         if now < self.next_frame_t:
             return                      # down-sample to the recording frame rate
         self.next_frame_t = max(self.next_frame_t + 1.0 / cfg.fps, now - 0.5 / cfg.fps)
-        limit = max(4, min(int(cfg.fps), int(300e6 // max(1, frame.nbytes))))
+        # Shrink to the recording size NOW (under 1 ms for 4K -> 1080p): a queued 1080p
+        # frame is a quarter of a 4K one, so the queue can ride out several seconds of
+        # encoder start-up / pre-record flushing without dropping the start of an event.
+        frame = fit_frame(frame, cfg.width, cfg.height)
+        limit = max(4, min(int(cfg.fps * 3), int(600e6 // max(1, frame.nbytes))))
         if self.q.qsize() < limit:
             self.q.put_nowait((frame, now, active or manual, manual))
         else:
@@ -157,9 +172,7 @@ class Recorder:
     def _prepare(self, frame, now):
         cfg = self.cfg
         if frame.shape[1] != cfg.width or frame.shape[0] != cfg.height:
-            if frame.shape[1] >= 4 * cfg.width:     # cheap pre-shrink (see imaging.downscale)
-                frame = cv2.resize(frame, (cfg.width * 2, cfg.height * 2), interpolation=cv2.INTER_NEAREST)
-            frame = cv2.resize(frame, (cfg.width, cfg.height), interpolation=cv2.INTER_AREA)
+            frame = fit_frame(frame, cfg.width, cfg.height)     # (settings changed mid-way)
         else:
             frame = frame.copy()
         if cfg.timestamp_overlay:
