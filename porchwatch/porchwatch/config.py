@@ -112,7 +112,10 @@ class RecordingConfig:
     width: int = 1280
     height: int = 720
     fps: int = 15
-    codec: str = "mp4v"             # mp4v (.mp4), avc1 (.mp4, needs H.264 build), MJPG (.avi), XVID (.avi)
+    # h264 / h265: efficient, via ffmpeg (small files). mp4v / MJPG / XVID: legacy OpenCV codecs.
+    codec: str = "h264"
+    encoder: str = "auto"           # auto (NVIDIA GPU if available, else CPU), nvidia, cpu
+    crf: int = 28                   # compression: higher = smaller files / lower quality (18-40)
     output_dir: str = "recordings"
     segment_minutes: int = 10       # continuous mode: start a new file every N minutes
     pre_record_s: float = 5.0

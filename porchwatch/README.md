@@ -73,7 +73,7 @@ Test without the camera: `python -m porchwatch --video some_street_clip.mp4`.
 | Section | What you can set |
 |---|---|
 | Camera | capture resolution (up to 4K), capture fps, device, PTZ backend, home position, invert axes |
-| Recording | mode (events / continuous / off), recording resolution, recording fps, codec, pre-record, post-record, file length, timestamp overlay, folder |
+| Recording | mode (events / continuous / off), recording resolution, recording fps, codec (H.264 / H.265), encoder (NVIDIA GPU or CPU), compression slider, pre-record, post-record, file length, timestamp overlay, folder |
 | Storage | days to keep recordings / snapshots, max GB for recordings |
 | Detection | person / vehicle sensitivity, moving-vehicle threshold, model size, image size, CPU/GPU, watch & ignore zones |
 | Tracking | on/off, prioritise vehicles, follow speed, lead, face / plate zoom target, time zoomed in, max chase, give-up time, re-capture interval |

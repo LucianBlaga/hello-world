@@ -47,8 +47,15 @@ SCHEMA = [
          "options": RESOLUTIONS_RECORD, "restart": True},
         {"key": "recording.fps", "label": "Recording frame rate", "type": "select", "options": FPS, "restart": True},
         {"key": "recording.codec", "label": "Codec", "type": "select",
-         "options": ["mp4v", "avc1", "MJPG", "XVID"], "restart": True,
-         "help": "mp4v works everywhere. avc1 (H.264) is smaller but needs an OpenCV build with H.264."},
+         "options": ["h264", "h265", "mp4v", "MJPG", "XVID"], "restart": True,
+         "help": "h264: small files that play everywhere (recommended). h265: about 40% smaller again, "
+                 "but some older players can't open it. mp4v / MJPG / XVID: old, very large files."},
+        {"key": "recording.encoder", "label": "Encoder", "type": "select", "options": ["auto", "nvidia", "cpu"],
+         "restart": True, "help": "auto uses the NVIDIA graphics card when available (almost no CPU), otherwise the CPU."},
+        {"key": "recording.crf", "label": "Compression", "type": "range", "min": 18, "max": 40, "step": 1,
+         "help": "Right = smaller files, left = better quality. 23 looks like the original, 28 is a good "
+                 "security default, 32-35 is small but softer. Every +6 roughly halves the file size. "
+                 "Applies to h264/h265 from the next recording."},
         {"key": "recording.pre_record_s", "label": "Pre-record (s)", "type": "number", "min": 0, "max": 30, "step": 1, "restart": True},
         {"key": "recording.post_record_s", "label": "Post-record (s)", "type": "number", "min": 0, "max": 120, "step": 1},
         {"key": "recording.segment_minutes", "label": "File length (min)", "type": "number", "min": 1, "max": 120, "step": 1},
@@ -241,6 +248,7 @@ def create_app(ctx) -> Flask:
             **ctx.status,
             "fps": round(ctx.fps, 1),
             "recording": bool(rec and rec.recording),
+            "encoder": rec.encoder_name if rec else None,
             "recording_file": str(rec.current_file) if rec and rec.current_file else None,
             "paused": ctx.paused,
             "patrol": ctx.cfg.patrol.enabled,

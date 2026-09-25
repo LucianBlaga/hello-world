@@ -86,6 +86,11 @@ def _codec_ext(codec: str) -> str:
     return ".avi" if codec.upper() in ("MJPG", "XVID", "DIVX") else ".mp4"
 
 
+def _uses_ffmpeg(codec: str) -> bool:
+    from .video import FFMPEG_CODECS
+    return codec.lower() in FFMPEG_CODECS
+
+
 class Recorder:
     """Writes video in the background at its own resolution / frame rate.
 
@@ -100,6 +105,14 @@ class Recorder:
         self.audio = audio                    # porchwatch.audio.AudioSource or None
         self.audio_bitrate_kbps = audio_bitrate_kbps
         self._mux_threads: list[threading.Thread] = []
+        self.encoder_name: str | None = None      # ffmpeg encoder, e.g. h264_nvenc / libx264
+        if cfg.mode != "off" and _uses_ffmpeg(cfg.codec):
+            from .video import pick_encoder
+            self.encoder_name = pick_encoder(cfg.codec.lower(), cfg.encoder)
+            if self.encoder_name:
+                log.info("Recording with %s (compression %d)", self.encoder_name, cfg.crf)
+            else:
+                log.warning("No %s encoder available (pip install imageio-ffmpeg); using mp4v", cfg.codec)
         self.root = Path(cfg.output_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self.writer: cv2.VideoWriter | None = None
@@ -149,8 +162,13 @@ class Recorder:
         day = self.root / dt.strftime("%Y-%m-%d")
         day.mkdir(parents=True, exist_ok=True)
         path = day / (dt.strftime("%H%M%S") + ("_event" if cfg.mode == "events" else "") + _codec_ext(cfg.codec))
-        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*cfg.codec[:4]), cfg.fps,
-                                 (cfg.width, cfg.height))
+        if self.encoder_name:
+            from .video import FFmpegWriter
+            writer = FFmpegWriter(path, cfg.fps, (cfg.width, cfg.height), self.encoder_name, cfg.crf)
+        else:
+            codec = "mp4v" if _uses_ffmpeg(cfg.codec) else cfg.codec
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*codec[:4]), cfg.fps,
+                                     (cfg.width, cfg.height))
         if not writer.isOpened():
             log.error("Could not open video writer (codec %s). Try mp4v or MJPG.", cfg.codec)
             return

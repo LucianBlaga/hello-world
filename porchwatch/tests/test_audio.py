@@ -3,6 +3,7 @@ import threading
 import time
 import wave
 
+import cv2
 import numpy as np
 import pytest
 
@@ -123,3 +124,53 @@ def test_recording_gets_audio_track(tmp_path):
     assert len(videos) == 1 and not [f for f in files if f.suffix == ".wav"], files
     info = subprocess.run([ffmpeg_exe(), "-i", str(videos[0])], capture_output=True, text=True).stderr
     assert "Audio: aac" in info and "Video:" in info
+
+
+def _street_frames(n, w=640, h=360):
+    """A textured scene with a moving object, closer to real footage than flat colour."""
+    rng = np.random.default_rng(1)
+    bg = cv2.GaussianBlur(rng.integers(0, 255, (h, w, 3), dtype=np.uint8), (0, 0), 3)
+    for i in range(n):
+        f = bg.copy()
+        x = (i * 7) % (w - 60)
+        cv2.rectangle(f, (x, 150), (x + 60, 300), (40, 160, 40), -1)
+        f = cv2.add(f, rng.integers(0, 6, (h, w, 3), dtype=np.uint8))      # sensor noise
+        yield f
+
+
+def _record(tmp_path, codec, crf=28, audio=None):
+    rc = Config().recording
+    rc.output_dir, rc.mode, rc.codec, rc.crf, rc.encoder = str(tmp_path / codec), "continuous", codec, crf, "cpu"
+    rc.width, rc.height, rc.fps = 640, 360, 15
+    rec = Recorder(rc, audio=audio)
+    t = time.time()
+    for i, f in enumerate(_street_frames(60)):         # 4 s of video
+        rec.feed(f, t + i / 15, active=True)
+    rec.close()
+    return [p for p in (tmp_path / codec).rglob("*") if p.is_file()]
+
+
+@pytest.mark.skipif(ffmpeg_exe() is None, reason="imageio-ffmpeg not installed")
+def test_h264_is_much_smaller_than_mp4v_and_crf_controls_size(tmp_path):
+    import cv2 as _cv2
+    old = _record(tmp_path, "mp4v")[0].stat().st_size
+    h264_files = _record(tmp_path, "h264")
+    assert h264_files[0].suffix == ".mp4"
+    new = h264_files[0].stat().st_size
+    cap = _cv2.VideoCapture(str(h264_files[0]))
+    assert int(cap.get(_cv2.CAP_PROP_FRAME_COUNT)) in range(58, 62)          # all frames, real time
+    small = _record(tmp_path / "hi", "h264", crf=36)[0].stat().st_size
+    print(f"mp4v {old/1e3:.0f} kB, h264@28 {new/1e3:.0f} kB, h264@36 {small/1e3:.0f} kB")
+    assert new < old / 3
+    assert small < new / 1.8
+
+
+@pytest.mark.skipif(ffmpeg_exe() is None, reason="imageio-ffmpeg not installed")
+def test_h264_recording_gets_audio(tmp_path):
+    src = _source()
+    time.sleep(0.5)
+    files = _record(tmp_path, "h264", audio=src)
+    src.close()
+    assert len(files) == 1 and files[0].suffix == ".mp4", files
+    info = subprocess.run([ffmpeg_exe(), "-i", str(files[0])], capture_output=True, text=True).stderr
+    assert "Video: h264" in info and "Audio: aac" in info
