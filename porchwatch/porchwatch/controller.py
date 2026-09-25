@@ -85,6 +85,9 @@ class Controller:
         self.recent: list[tuple] = []   # (kind, pan, tilt, vpan, vtilt, t_end, until)
         self.last_event: dict | None = None
         self.active_until = 0.0         # something of interest in view until this time
+        self.patrol_idx = 0
+        self.patrol_step = 1
+        self.dwell_until = 0.0
 
     @property
     def ptz_enabled(self) -> bool:
@@ -95,6 +98,46 @@ class Controller:
         self.target = None
         self.state = State.HOME
         self.tracker.reset()
+        self.dwell_until = 0.0
+
+    # ------------------------------------------------------------ patrol
+    @property
+    def patrolling(self) -> bool:
+        return self.ptz_enabled and self.cfg.patrol.enabled
+
+    def patrol_positions(self) -> list[float]:
+        p = self.cfg.patrol
+        lo, hi = sorted((p.left_pan, p.right_pan))
+        n = max(1, int(p.stops))
+        if n == 1 or hi - lo < 1e-3:
+            return [(lo + hi) / 2]
+        return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+
+    def _goto_stop(self, now) -> None:
+        stops = self.patrol_positions()
+        self.patrol_idx = min(self.patrol_idx, len(stops) - 1)
+        c = self.cfg.camera
+        self.ptz.move(PTZState(stops[self.patrol_idx], c.home_tilt, c.home_zoom), force=True)
+        self.ptz.moving_until += 0.3            # let the picture settle
+        self.tracker.reset()
+        self.dwell_until = self.ptz.moving_until + max(1.0, self.cfg.patrol.dwell_s)
+
+    def _next_stop(self, now) -> None:
+        n = len(self.patrol_positions())
+        if n > 1:
+            nxt = self.patrol_idx + self.patrol_step
+            if not 0 <= nxt < n:                # bounce at the edges
+                self.patrol_step = -self.patrol_step
+                nxt = self.patrol_idx + self.patrol_step
+            self.patrol_idx = nxt
+        self._goto_stop(now)
+
+    def _go_rest(self, now) -> None:
+        """Where to go when not chasing anything: current patrol stop, or home."""
+        if self.patrolling:
+            self._goto_stop(now)
+        else:
+            self.ptz.home()
 
     # ------------------------------------------------------------ geometry
     def img_to_world(self, x, y, w, h):
@@ -125,7 +168,8 @@ class Controller:
     def status(self, now: float) -> dict:
         t = self.target
         return {
-            "state": self.state.value,
+            "state": (f"patrolling ({self.patrol_idx + 1}/{len(self.patrol_positions())})"
+                      if self.state == State.HOME and self.patrolling else self.state.value),
             "target": t.label if t else None,
             "zoom": round(self.ptz.state.zoom, 2),
             "pan": round(self.ptz.state.pan, 1),
@@ -164,6 +208,8 @@ class Controller:
             elif d.kind == VEHICLE and tr.travel(now, dcfg.motion_window_s) >= dcfg.motion_min_travel * w:
                 candidates.append((2 if self.cfg.tracking.prefer_vehicles else 0, d.width, tr))
         if not candidates:
+            if self.patrolling and now >= self.dwell_until:
+                self._next_stop(now)
             return
         candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
         tr = candidates[0][2]
@@ -345,7 +391,7 @@ class Controller:
         self.tracker.reset()
         self.cooldown_until = now + self.cfg.tracking.cooldown_s
         if self.ptz_enabled:
-            self.ptz.home()
+            self._go_rest(now)
 
 
 # ------------------------------------------------------------ drawing
@@ -369,7 +415,8 @@ def annotate(frame: np.ndarray, dets: list[Detection], ctl: Controller, fps: flo
             cv2.rectangle(out, (fx1, fy1), (fx2, fy2), (0, 255, 0), int(2 * s))
     cv2.drawMarker(out, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, int(20 * s), 1)
     st = ctl.ptz.state
-    txt = f"{ctl.state.value.upper()}  pan {st.pan:+.1f}  tilt {st.tilt:+.1f}  zoom {st.zoom:.1f}x  {fps:.0f} fps"
+    label = "PATROLLING" if ctl.state == State.HOME and ctl.patrolling else ctl.state.value.upper()
+    txt = f"{label}  pan {st.pan:+.1f}  tilt {st.tilt:+.1f}  zoom {st.zoom:.1f}x  {fps:.0f} fps"
     if t is not None and t.plate_votes:
         txt += f"  plate? {t.plate_votes.most_common(1)[0][0]}"
     draw_label(out, txt, (int(12 * s), int(30 * s)), 0.6 * s)

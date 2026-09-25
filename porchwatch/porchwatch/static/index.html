@@ -128,9 +128,18 @@
             <button class="btn" data-ptz="down">▼</button>
             <span></span>
           </div>
-          <div style="display:flex; gap:6px; margin-top:10px">
+          <div style="display:flex; gap:6px; margin-top:10px; flex-wrap:wrap">
             <button class="btn small" data-ptz="set_home">Set current view as home</button>
             <button class="btn small" id="pausebtn">Pause tracking</button>
+          </div>
+          <div style="border-top:1px solid var(--line); margin-top:12px; padding-top:10px">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:500">
+              <input type="checkbox" class="switch" id="patrolchk"> Patrol (sweep left ↔ right)
+            </label>
+            <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap">
+              <button class="btn small" data-ptz="set_patrol_left">Set as left edge</button>
+              <button class="btn small" data-ptz="set_patrol_right">Set as right edge</button>
+            </div>
           </div>
           <p class="muted" style="font-size:12px; margin:8px 0 0">Moving the camera manually pauses auto-tracking. Press Home to resume.</p>
         </div>
@@ -198,6 +207,7 @@ async function refreshStatus() {
   try {
     const s = await api("api/status");
     paused = s.paused;
+    if (document.activeElement !== $("#patrolchk")) $("#patrolchk").checked = !!s.patrol;
     $("#pausebtn").textContent = paused ? "Resume tracking" : "Pause tracking";
     $("#recdot").classList.toggle("rec", s.recording);
     $("#rectext").textContent = s.recording ? "REC" : (s.state || "idle");
@@ -214,7 +224,14 @@ async function refreshStatus() {
   } catch (e) { $("#rectext").textContent = "offline"; }
 }
 setInterval(refreshStatus, 1000); refreshStatus();
-$$("[data-ptz]").forEach(b => b.onclick = () => post("api/ptz", { action: b.dataset.ptz }).then(() => b.dataset.ptz === "set_home" && toast("Home position saved")));
+const ptzToast = { set_home: "Home position saved", set_patrol_left: "Patrol left edge saved", set_patrol_right: "Patrol right edge saved" };
+$$("[data-ptz]").forEach(b => b.onclick = () => post("api/ptz", { action: b.dataset.ptz }).then(() => ptzToast[b.dataset.ptz] && toast(ptzToast[b.dataset.ptz])));
+$("#patrolchk").onchange = async e => {
+  const on = e.target.checked;
+  const r = await post("api/settings", { patrol: { enabled: on } });
+  if (r.ok) { if (on && paused) await post("api/ptz", { action: "home" }); toast(on ? "Patrol on" : "Patrol off"); }
+  else { e.target.checked = !on; toast("Error: " + r.error); }
+};
 $("#pausebtn").onclick = () => post("api/pause", { paused: !paused }).then(refreshStatus);
 
 // ---------- events

@@ -84,6 +84,16 @@ class TrackingConfig:
 
 
 @dataclass
+class PatrolConfig:
+    # Sweep between two pan angles, stopping at each position to look.
+    enabled: bool = False
+    left_pan: float = -45.0
+    right_pan: float = 45.0
+    stops: int = 3                  # positions between (and including) the two edges
+    dwell_s: float = 3.0            # seconds to hold still and look at each stop
+
+
+@dataclass
 class CaptureConfig:
     output_dir: str = "captures"
     min_face_px: int = 80
@@ -130,6 +140,7 @@ class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    patrol: PatrolConfig = field(default_factory=PatrolConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     web: WebConfig = field(default_factory=WebConfig)

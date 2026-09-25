@@ -209,3 +209,52 @@ def test_zooms_to_read_plate_of_passing_car(tmp_path, speed):
     sim.run(10, lambda s: zooms.append(s.ptz.state.zoom))
     assert max(zooms) > 2.0
     assert [e.get("plate") for e in sim.events()] == ["MOVING1"]
+
+
+def _enable_patrol(sim, left=-60, right=60, stops=3, dwell=2.0):
+    p = sim.cfg.patrol
+    p.enabled, p.left_pan, p.right_pan, p.stops, p.dwell_s = True, left, right, stops, dwell
+
+
+def test_patrol_sweeps_back_and_forth_when_nothing_happens(tmp_path):
+    sim = Sim(tmp_path)
+    _enable_patrol(sim)
+    visited = []
+
+    def watch(s):
+        pan = round(s.ptz.state.pan)
+        if not visited or visited[-1] != pan:
+            visited.append(pan)
+
+    sim.run(20, watch)
+    assert set(visited) == {-60, 0, 60}, visited
+    # ping-pong: every step moves to a neighbouring stop, direction flips only at the edges
+    for a, b, c in zip(visited, visited[1:], visited[2:]):
+        assert abs(b - a) == 60 and (b == c - (b - a) or b in (-60, 60)), visited
+    assert not sim.events()
+
+
+def test_patrol_finds_person_outside_home_view_then_resumes(tmp_path):
+    sim = Sim(tmp_path)
+    _enable_patrol(sim)
+    # standing far right: invisible from home (pan 0, ~76 deg view) but seen at the +60 stop
+    sim.objects.append(person(sim, pan0=62, speed=0.0))
+    tracked = []
+    sim.run(25, lambda s: tracked.append(s.ctl.state == State.TRACK))
+    events = sim.events()
+    assert len(events) == 1 and events[0]["kind"] == "person" and "face" in events[0]["files"]
+    # after the capture it kept patrolling (the camera still moves between stops)
+    last_track = max(i for i, t in enumerate(tracked) if t)
+    pans_after = {round(sim.ptz.state.pan)}
+    sim.objects.clear()
+    sim.run(10, lambda s: pans_after.add(round(s.ptz.state.pan)))
+    assert len(pans_after) >= 2 and last_track < len(tracked) - 1
+
+
+def test_patrol_positions():
+    cfg = Config()
+    cfg.patrol.left_pan, cfg.patrol.right_pan, cfg.patrol.stops = 40, -40, 5
+    ctl = Controller(cfg, NullPTZ(cfg.camera), None, None, None)
+    assert ctl.patrol_positions() == [-40, -20, 0, 20, 40]
+    cfg.patrol.stops = 1
+    assert ctl.patrol_positions() == [0]

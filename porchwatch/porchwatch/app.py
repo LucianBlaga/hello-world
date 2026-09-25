@@ -58,7 +58,8 @@ class App:
             self._restart = True
 
     def manual_ptz(self, action: str) -> bool:
-        valid = {"left", "right", "up", "down", "zoom_in", "zoom_out", "home", "set_home"}
+        valid = {"left", "right", "up", "down", "zoom_in", "zoom_out", "home", "set_home",
+                 "set_patrol_left", "set_patrol_right"}
         if action not in valid:
             return False
         self._ptz_cmds.put(action)
@@ -141,6 +142,14 @@ class App:
                 ctl.reset()
                 ptz.home()
                 self.paused = False
+                continue
+            if action in ("set_patrol_left", "set_patrol_right"):
+                side = "left" if action.endswith("left") else "right"
+                with self.cfg_lock:
+                    setattr(self.cfg.patrol, f"{side}_pan", round(st.pan, 1))
+                from .config import save_config
+                save_config(self.cfg, self.config_path)
+                self.storage.log(f"Patrol {side} edge set to pan {st.pan:.1f}")
                 continue
             if action == "set_home":
                 with self.cfg_lock:

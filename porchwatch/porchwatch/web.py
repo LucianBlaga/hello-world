@@ -95,6 +95,18 @@ SCHEMA = [
          "min": 0, "max": 600, "step": 5},
         {"key": "tracking.cooldown_s", "label": "Cool-down at home (s)", "type": "number", "min": 0, "max": 30, "step": 0.5},
     ]},
+    {"title": "Patrol", "fields": [
+        {"key": "patrol.enabled", "label": "Patrol (sweep left/right)", "type": "bool",
+         "help": "Instead of waiting at home, the camera visits positions between the two edges, "
+                 "holding still at each to look. Anything detected is followed and zoomed as usual."},
+        {"key": "patrol.left_pan", "label": "Left edge (deg)", "type": "number", "min": -130, "max": 130, "step": 0.5,
+         "help": "Easier: aim the camera on the Live page and click 'Set as left edge'."},
+        {"key": "patrol.right_pan", "label": "Right edge (deg)", "type": "number", "min": -130, "max": 130, "step": 0.5},
+        {"key": "patrol.stops", "label": "Number of stops", "type": "number", "min": 1, "max": 20, "step": 1,
+         "help": "Positions from edge to edge. More stops = smoother sweep, but longer to cover the area."},
+        {"key": "patrol.dwell_s", "label": "Look time per stop (s)", "type": "number", "min": 1, "max": 60, "step": 0.5,
+         "help": "Moving cars are only recognised while the camera is still, so keep this at 2 s or more."},
+    ]},
     {"title": "Snapshots", "fields": [
         {"key": "capture.min_face_px", "label": "Min face size (px)", "type": "number", "min": 30, "max": 400, "step": 5},
         {"key": "capture.min_sharpness", "label": "Min sharpness", "type": "number", "min": 0, "max": 500, "step": 5,
@@ -203,6 +215,7 @@ def create_app(ctx) -> Flask:
             "recording": bool(rec and rec.recording),
             "recording_file": str(rec.current_file) if rec and rec.current_file else None,
             "paused": ctx.paused,
+            "patrol": ctx.cfg.patrol.enabled,
             "error": ctx.error,
             "storage": disk_usage(ctx.cfg.recording.output_dir),
             "log": list(ctx.storage.messages)[-30:] if ctx.storage else [],
