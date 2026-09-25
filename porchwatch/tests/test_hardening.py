@@ -381,8 +381,8 @@ def test_tensorrt_missing_falls_back_to_pytorch(monkeypatch):
     real_import = builtins.__import__
 
     def no_trt(name, *a, **k):
-        if name == "tensorrt":
-            raise ImportError("no tensorrt")
+        if name in ("tensorrt", "onnx", "onnxslim"):
+            raise ImportError("missing")
         return real_import(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", no_trt)
     det = ObjectDetector.__new__(ObjectDetector)          # skip loading a real YOLO model
@@ -391,7 +391,7 @@ def test_tensorrt_missing_falls_back_to_pytorch(monkeypatch):
     det.cuda, det.precision, det.engine, det._engine_thread, det.engine_status = True, {}, None, None, "off"
     det._start_engine_build((2160, 3840, 3))
     assert det.engine is None and det._engine_thread is None
-    assert "pip install tensorrt" in det.engine_status
+    assert "pip install tensorrt onnx onnxslim" in det.engine_status
 
     det.cuda, det.engine_status = False, "off"
     det._start_engine_build((2160, 3840, 3))

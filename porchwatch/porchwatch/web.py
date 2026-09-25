@@ -129,7 +129,7 @@ SCHEMA = [
         {"key": "detection.tensorrt", "label": "Use TensorRT (NVIDIA)", "type": "bool", "restart": True,
          "help": "Converts the model for your graphics card: typically 2-3x faster detection. The first start "
                  "builds it in the background (a few minutes; detection keeps working meanwhile). Needs: "
-                 "python -m pip install tensorrt. Rebuilt automatically when model or image size change."},
+                 "python -m pip install tensorrt onnx onnxslim. Rebuilt automatically when model or image size change."},
         {"key": "detection.fp16", "label": "Half precision (FP16)", "type": "bool", "restart": True,
          "help": "NVIDIA GPUs only: about 1.3-1.6x faster detection with practically the same accuracy."},
         {"key": "detection.device", "label": "Compute device", "type": "select", "options": ["", "cpu", "cuda:0", "mps"],

@@ -150,12 +150,18 @@ class ObjectDetector:
             self.engine_status = "needs an NVIDIA GPU"
             log.warning("TensorRT needs an NVIDIA GPU with CUDA; using PyTorch")
             return
-        try:
-            import tensorrt
-        except ImportError:
-            self.engine_status = "not installed (python -m pip install tensorrt)"
-            log.warning("TensorRT not installed: python -m pip install tensorrt  (using PyTorch)")
+        missing = []
+        for mod, pkg in (("tensorrt", "tensorrt"), ("onnx", "onnx"), ("onnxslim", "onnxslim")):
+            try:
+                __import__(mod)
+            except ImportError:
+                missing.append(pkg)
+        if missing:
+            cmd = "python -m pip install " + " ".join(missing)
+            self.engine_status = f"not installed ({cmd})"
+            log.warning("TensorRT needs: %s  (using PyTorch meanwhile)", cmd)
             return
+        import tensorrt
         h, w = engine_size(int(cfg.imgsz), frame_shape)
         fp16 = bool(self.precision)
         path = engine_path(cfg.model, (h, w), fp16, tensorrt.__version__)
