@@ -115,6 +115,10 @@
           <div class="kv" id="status"></div>
           <div id="error" class="err"></div>
         </div>
+        <div class="card" style="display:flex; align-items:center; gap:12px">
+          <button class="btn" id="recbtn" style="min-width:130px; font-weight:600">● REC</button>
+          <span class="muted" id="rechint" style="font-size:12px">Start / stop recording manually, whatever the mode.</span>
+        </div>
         <div class="card">
           <h2>Camera control</h2>
           <div class="pad">
@@ -214,11 +218,18 @@ $$("nav button").forEach(b => b.onclick = () => {
 });
 
 // ---------- live status
-let paused = false;
+let paused = false, manualRec = false;
 async function refreshStatus() {
   try {
     const s = await api("api/status");
     paused = s.paused;
+    manualRec = !!s.manual_rec;
+    const rb = $("#recbtn");
+    rb.textContent = manualRec ? "■ STOP REC" : "● REC";
+    rb.style.background = manualRec ? "var(--rec)" : "";
+    rb.style.borderColor = manualRec ? "var(--rec)" : "";
+    rb.style.color = manualRec ? "#fff" : "var(--rec)";
+    $("#rechint").textContent = manualRec ? "Recording until you press stop." : "Start / stop recording manually, whatever the mode.";
     $("#audiocard").style.display = s.audio ? "block" : "none";
     if (s.audio) {
       const db = s.audio.level_db, pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
@@ -256,6 +267,7 @@ $("#listenbtn").onclick = () => {
   if (p.paused || !p.src) { p.src = "audio.wav?" + Date.now(); p.play(); $("#listenbtn").textContent = "■ Stop listening"; }
   else { p.pause(); p.removeAttribute("src"); p.load(); $("#listenbtn").textContent = "▶ Listen live"; }
 };
+$("#recbtn").onclick = () => post("api/record", { on: !manualRec }).then(r => { toast(r.manual_rec ? "Recording started" : "Recording stopped"); refreshStatus(); });
 $("#pausebtn").onclick = () => post("api/pause", { paused: !paused }).then(refreshStatus);
 
 // ---------- events

@@ -106,7 +106,8 @@ class Recorder:
         self.audio_bitrate_kbps = audio_bitrate_kbps
         self._mux_threads: list[threading.Thread] = []
         self.encoder_name: str | None = None      # ffmpeg encoder, e.g. h264_nvenc / libx264
-        if cfg.mode != "off" and _uses_ffmpeg(cfg.codec):
+        self._manual = False
+        if _uses_ffmpeg(cfg.codec):
             from .video import pick_encoder
             self.encoder_name = pick_encoder(cfg.codec.lower(), cfg.encoder)
             if self.encoder_name:
@@ -132,15 +133,16 @@ class Recorder:
     def recording(self) -> bool:
         return self.writer is not None
 
-    def feed(self, frame: np.ndarray, now: float, active: bool) -> None:
+    def feed(self, frame: np.ndarray, now: float, active: bool, manual: bool = False) -> None:
+        """`manual`: the REC button is on - record regardless of mode or detections."""
         cfg = self.cfg
-        if cfg.mode == "off":
+        if cfg.mode == "off" and not manual and not self.recording:
             return
         if now < self.next_frame_t:
             return                      # down-sample to the recording frame rate
         self.next_frame_t = max(self.next_frame_t + 1.0 / cfg.fps, now - 0.5 / cfg.fps)
         try:
-            self.q.put_nowait((frame, now, active))
+            self.q.put_nowait((frame, now, active or manual, manual))
         except queue.Full:
             log.warning("Recorder falling behind, dropping frame")
 
@@ -161,7 +163,8 @@ class Recorder:
         dt = datetime.fromtimestamp(now)
         day = self.root / dt.strftime("%Y-%m-%d")
         day.mkdir(parents=True, exist_ok=True)
-        path = day / (dt.strftime("%H%M%S") + ("_event" if cfg.mode == "events" else "") + _codec_ext(cfg.codec))
+        kind = "_manual" if self._manual else ("" if cfg.mode == "continuous" else "_event")
+        path = day / (dt.strftime("%H%M%S") + kind + _codec_ext(cfg.codec))
         if self.encoder_name:
             from .video import FFmpegWriter
             writer = FFmpegWriter(path, cfg.fps, (cfg.width, cfg.height), self.encoder_name, cfg.crf)
@@ -211,14 +214,20 @@ class Recorder:
     def _loop(self):
         while self._running or not self.q.empty():
             try:
-                frame, now, active = self.q.get(timeout=0.5)
+                frame, now, active, manual = self.q.get(timeout=0.5)
             except queue.Empty:
                 continue
             cfg = self.cfg
+            mode = "events" if cfg.mode == "off" else cfg.mode    # "off" still honours the REC button
             frame = self._prepare(frame, now)
+            if self._manual and not manual and mode == "events" and self.writer is not None:
+                self._close()                   # REC button released: stop now, no post-record
+                self.last_active = 0.0
+                active = False
+            self._manual = manual
             if active:
                 self.last_active = now
-            if cfg.mode == "continuous":
+            if mode == "continuous":
                 if self.writer and now - self.segment_started > cfg.segment_minutes * 60:
                     self._close()
                 if not self.writer:

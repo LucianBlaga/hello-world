@@ -84,7 +84,9 @@ def _client(tmp_path, password=""):
         storage=Storage(cfg.capture),
         apply_config=lambda new, restart: applied.update(cfg=new, restart=restart),
         manual_ptz=lambda a: a == "home",
+        manual_rec=False,
     )
+    ctx.set_manual_record = lambda on: setattr(ctx, "manual_rec", on)
     return create_app(ctx).test_client(), ctx, applied
 
 
@@ -149,3 +151,28 @@ def test_web_rejects_unwritable_folder(tmp_path):
     good = tmp_path / "other_drive" / "recordings"
     r = client.post("/api/settings", json={"recording": {"output_dir": str(good)}}).get_json()
     assert r["ok"] and r["restarted"] and good.is_dir()
+
+
+@pytest.mark.parametrize("mode", ["off", "events"])
+def test_manual_rec_button_records_and_stops_immediately(tmp_path, mode):
+    import cv2
+    cfg = Config().recording
+    cfg.output_dir, cfg.mode, cfg.codec = str(tmp_path / "rec"), mode, "MJPG"
+    cfg.width, cfg.height, cfg.fps, cfg.pre_record_s, cfg.post_record_s = 320, 180, 10, 0, 10
+    rec = Recorder(cfg)
+    frame = np.zeros((360, 640, 3), np.uint8)
+    t = time.time()
+    for i in range(60):             # 6 s; REC pressed from 1 s to 3 s, nothing detected
+        rec.feed(frame, t + i * 0.1, active=False, manual=10 <= i < 30)
+    rec.close()
+    files = list((tmp_path / "rec").rglob("*.avi"))
+    assert len(files) == 1 and "_manual" in files[0].name, files
+    n = int(cv2.VideoCapture(str(files[0])).get(cv2.CAP_PROP_FRAME_COUNT))
+    assert 19 <= n <= 22, n        # ~2 s: stopped right away, no 10 s post-record
+
+
+def test_web_record_button(tmp_path):
+    client, ctx, _ = _client(tmp_path)
+    assert client.post("/api/record", json={"on": True}).get_json() == {"manual_rec": True}
+    assert client.get("/api/status").get_json()["manual_rec"] is True
+    assert client.post("/api/record", json={"on": False}).get_json() == {"manual_rec": False}

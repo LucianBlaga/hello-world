@@ -264,6 +264,7 @@ def create_app(ctx) -> Flask:
             "encoder": rec.encoder_name if rec else None,
             "recording_file": str(rec.current_file) if rec and rec.current_file else None,
             "paused": ctx.paused,
+            "manual_rec": getattr(ctx, "manual_rec", False),
             "patrol": ctx.cfg.patrol.enabled,
             "audio": ({"level_db": round(ctx.audio.level_db, 1)} if getattr(ctx, "audio", None) else None),
             "error": ctx.error,
@@ -331,6 +332,13 @@ def create_app(ctx) -> Flask:
         data = request.get_json(force=True, silent=True) or {}
         ok = ctx.manual_ptz(data.get("action", ""))
         return jsonify({"ok": ok})
+
+    @app.post("/api/record")
+    @auth
+    def record():
+        data = request.get_json(force=True, silent=True) or {}
+        ctx.set_manual_record(bool(data.get("on", not ctx.manual_rec)))
+        return jsonify({"manual_rec": ctx.manual_rec})
 
     @app.post("/api/pause")
     @auth

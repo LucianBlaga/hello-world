@@ -40,6 +40,7 @@ class App:
         self.fps = 0.0
         self.error: str | None = None
         self.paused = False
+        self.manual_rec = False                     # REC button on the Live page
         self.storage: Storage | None = None
         self.recorder: Recorder | None = None
         self.audio = None                           # AudioSource while audio is enabled
@@ -57,6 +58,11 @@ class App:
         if restart:
             log.info("Settings changed that need the camera/recorder reopened - restarting pipeline")
             self._restart = True
+
+    def set_manual_record(self, on: bool) -> None:
+        self.manual_rec = bool(on)
+        if self.storage:
+            self.storage.log("Manual recording started" if on else "Manual recording stopped")
 
     def manual_ptz(self, action: str) -> bool:
         valid = {"left", "right", "up", "down", "zoom_in", "zoom_out", "home", "set_home",
@@ -233,7 +239,7 @@ class App:
                     else:
                         status = ctl.step(frame, dets, now)
                 self.status = status
-                recorder.feed(frame, now, status["active"])
+                recorder.feed(frame, now, status["active"], manual=self.manual_rec)
 
                 dt = now - t_prev
                 t_prev = now
@@ -281,4 +287,6 @@ class App:
             self.manual_ptz(keymap[key])
         elif key == ord("p"):
             self.paused = not self.paused
+        elif key == ord("r"):
+            self.set_manual_record(not self.manual_rec)
         return True
