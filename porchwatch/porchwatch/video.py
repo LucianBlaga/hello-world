@@ -10,6 +10,8 @@ import functools
 import logging
 import os
 import subprocess
+import threading
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +80,15 @@ class FFmpegWriter:
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
                                      creationflags=_NO_WINDOW)
         self._ok = True
+        # Always drain ffmpeg's messages: if nobody reads them the pipe fills up,
+        # ffmpeg blocks, and so would the recorder.
+        self._errors: deque = deque(maxlen=30)
+        self._err_thread = threading.Thread(target=self._drain, name="ffmpeg-stderr", daemon=True)
+        self._err_thread.start()
+
+    def _drain(self) -> None:
+        for line in iter(self.proc.stderr.readline, b""):
+            self._errors.append(line.decode(errors="replace").rstrip())
 
     def isOpened(self) -> bool:
         return self._ok and self.proc.poll() is None
@@ -89,8 +100,8 @@ class FFmpegWriter:
             self.proc.stdin.write(np.ascontiguousarray(frame).tobytes())
         except (BrokenPipeError, OSError):
             self._ok = False
-            err = self.proc.stderr.read().decode(errors="replace") if self.proc.stderr else ""
-            log.error("Video encoder stopped: %s", err.strip()[-300:])
+            self._err_thread.join(timeout=2)
+            log.error("Video encoder stopped: %s", " | ".join(self._errors)[-300:])
 
     def release(self) -> None:
         try:
@@ -101,3 +112,6 @@ class FFmpegWriter:
             self.proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self._err_thread.join(timeout=2)
+        if self.proc.returncode not in (0, None) and self._errors:
+            log.warning("Video encoder: %s", " | ".join(self._errors)[-300:])

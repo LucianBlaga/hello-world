@@ -339,7 +339,8 @@ function renderField(f) {
     input = `<div class="range-wrap"><input type="range" id="${id}" min="${f.min}" max="${f.max}" step="${f.step}" value="${shown}"><output>${v}</output></div>`;
   } else {
     const t = f.type === "number" ? "number" : f.type === "password" ? "password" : "text";
-    const extra = f.type === "number" ? `min="${f.min}" max="${f.max}" step="${f.step}"` : "";
+    const extra = (f.type === "number" ? `min="${f.min}" max="${f.max}" step="${f.step}"` : "")
+      + (f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : "");
     input = `<input type="${t}" id="${id}" ${extra} value="${esc(getPath(draft, f.key))}">`;
   }
   return `<div class="field"><label for="${id}">${esc(f.label)}${restart}</label>${input}${help}</div>`;

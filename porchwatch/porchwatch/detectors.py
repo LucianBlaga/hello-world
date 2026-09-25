@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,12 +64,28 @@ def filter_zones(dets: list[Detection], w: int, h: int, cfg: DetectionConfig) ->
     return out
 
 
+def model_path(name: str) -> Path:
+    """Where a detection model lives: models/<name>, so downloads don't land next to
+    the code. A bare name already downloaded to the working folder (older versions)
+    is moved there instead of being downloaded again."""
+    p = Path(name)
+    if p.is_absolute() or p.parent != Path("."):
+        return p                        # an explicit path chosen by the user
+    target = MODELS_DIR / p.name
+    if not target.exists() and p.exists():
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(p), str(target))
+        log.info("Moved %s into %s", p.name, MODELS_DIR)
+    return target
+
+
 class ObjectDetector:
     def __init__(self, cfg: DetectionConfig):
         from ultralytics import YOLO
 
         self.cfg = cfg
-        self.model = YOLO(cfg.model)
+        # Ultralytics downloads a missing model to exactly this path.
+        self.model = YOLO(str(model_path(cfg.model)))
 
     def __call__(self, frame: np.ndarray) -> list[Detection]:
         cfg = self.cfg
@@ -106,7 +123,9 @@ def _download(urls: list[str], path: Path) -> None:
     errors = []
     for url in urls:
         try:
-            urllib.request.urlretrieve(url, tmp)
+            # A timeout, so a stalled connection can't hang start-up forever.
+            with urllib.request.urlopen(url, timeout=30) as resp, open(tmp, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
             tmp.replace(path)
             return
         except Exception as exc:

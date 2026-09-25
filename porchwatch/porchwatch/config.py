@@ -1,6 +1,8 @@
 """Configuration: dataclass defaults, optionally overridden by a YAML file."""
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -166,6 +168,9 @@ class WebConfig:
     port: int = 8080
     username: str = "admin"
     password: str = ""              # empty = no login required
+    # Extra host names allowed in the browser address bar (IP addresses and
+    # "localhost" always work), e.g. ["mypc.local"].
+    allowed_hosts: list = field(default_factory=list)
     stream_fps: int = 10
     stream_width: int = 960
 
@@ -218,13 +223,18 @@ def config_to_dict(cfg: Any) -> dict:
     return out
 
 
+_save_lock = threading.Lock()
+
+
 def save_config(cfg: Config, path: str | Path) -> None:
+    """Atomic write; safe to call from the web thread and the main loop at once."""
     import yaml
 
-    tmp = Path(str(path) + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(config_to_dict(cfg), fh, sort_keys=False)
-    tmp.replace(path)
+    with _save_lock:
+        tmp = Path(f"{path}.{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(config_to_dict(cfg), fh, sort_keys=False)
+        os.replace(tmp, path)
 
 
 def load_config(path: str | Path | None) -> Config:

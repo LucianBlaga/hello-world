@@ -33,6 +33,13 @@ def test_zone_filter():
     assert len(kept) == 1 and kept[0].box[0] == 500
 
 
+def feed_paced(rec, frame, t, **kw):
+    """Like a real camera: don't outrun the recorder (it drops frames beyond ~1 s)."""
+    while rec.q.qsize() >= 4:
+        time.sleep(0.002)
+    rec.feed(frame, t, **kw)
+
+
 @pytest.mark.parametrize("mode", ["events", "continuous"])
 def test_recorder_writes_video(tmp_path, mode):
     cfg = Config().recording
@@ -42,7 +49,7 @@ def test_recorder_writes_video(tmp_path, mode):
     frame = np.zeros((360, 640, 3), np.uint8)
     t = time.time()
     for i in range(40):     # 4 s of camera at 10 fps; active from 2 s to 3 s
-        rec.feed(frame, t + i * 0.1, active=20 <= i < 30)
+        feed_paced(rec, frame, t + i * 0.1, active=20 <= i < 30)
     rec.close()
     files = list((tmp_path / "rec").rglob("*.avi"))
     assert len(files) == 1 and files[0].stat().st_size > 1000
@@ -133,7 +140,7 @@ def test_recording_plays_in_real_time_when_frames_arrive_slowly(tmp_path):
     frame = np.zeros((180, 320, 3), np.uint8)
     t = time.time()
     for i in range(51):             # frames arrive at 17 fps for 3 s
-        rec.feed(frame, t + i / 17, active=True)
+        feed_paced(rec, frame, t + i / 17, active=True)
     rec.close()
     f = next((tmp_path / "rec").rglob("*.avi"))
     cap = cv2.VideoCapture(str(f))
@@ -163,7 +170,7 @@ def test_manual_rec_button_records_and_stops_immediately(tmp_path, mode):
     frame = np.zeros((360, 640, 3), np.uint8)
     t = time.time()
     for i in range(60):             # 6 s; REC pressed from 1 s to 3 s, nothing detected
-        rec.feed(frame, t + i * 0.1, active=False, manual=10 <= i < 30)
+        feed_paced(rec, frame, t + i * 0.1, active=False, manual=10 <= i < 30)
     rec.close()
     files = list((tmp_path / "rec").rglob("*.avi"))
     assert len(files) == 1 and "_manual" in files[0].name, files

@@ -124,7 +124,11 @@ class Recorder:
         self.video_t: float | None = None     # timeline position of the next video frame
         # Pre-roll is kept JPEG-compressed to save memory.
         self.preroll: deque = deque(maxlen=max(1, int(cfg.pre_record_s * cfg.fps) + 1))
-        self.q: queue.Queue = queue.Queue(maxsize=120)
+        # Raw frames are up to 25 MB each at 4K: the queue is bounded in feed() to
+        # ~1 s of frames and ~300 MB, so a stalled encoder can't eat the memory.
+        self.q: queue.Queue = queue.Queue()
+        self._dropped = 0
+        self._drop_logged = 0.0
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="recorder", daemon=True)
         self._thread.start()
@@ -141,14 +145,20 @@ class Recorder:
         if now < self.next_frame_t:
             return                      # down-sample to the recording frame rate
         self.next_frame_t = max(self.next_frame_t + 1.0 / cfg.fps, now - 0.5 / cfg.fps)
-        try:
+        limit = max(4, min(int(cfg.fps), int(300e6 // max(1, frame.nbytes))))
+        if self.q.qsize() < limit:
             self.q.put_nowait((frame, now, active or manual, manual))
-        except queue.Full:
-            log.warning("Recorder falling behind, dropping frame")
+        else:
+            self._dropped += 1
+            if now - self._drop_logged > 10:
+                log.warning("Recorder falling behind: %d frame(s) dropped", self._dropped)
+                self._drop_logged, self._dropped = now, 0
 
     def _prepare(self, frame, now):
         cfg = self.cfg
         if frame.shape[1] != cfg.width or frame.shape[0] != cfg.height:
+            if frame.shape[1] >= 4 * cfg.width:     # cheap pre-shrink (see imaging.downscale)
+                frame = cv2.resize(frame, (cfg.width * 2, cfg.height * 2), interpolation=cv2.INTER_NEAREST)
             frame = cv2.resize(frame, (cfg.width, cfg.height), interpolation=cv2.INTER_AREA)
         else:
             frame = frame.copy()
@@ -164,7 +174,13 @@ class Recorder:
         day = self.root / dt.strftime("%Y-%m-%d")
         day.mkdir(parents=True, exist_ok=True)
         kind = "_manual" if self._manual else ("" if cfg.mode == "continuous" else "_event")
-        path = day / (dt.strftime("%H%M%S") + kind + _codec_ext(cfg.codec))
+        stem = dt.strftime("%H%M%S") + kind
+        n = 1
+        # Never overwrite: e.g. the hour repeated when clocks go back in autumn.
+        while any(day.glob(f"{stem}.*")):
+            n += 1
+            stem = f"{dt.strftime('%H%M%S')}{kind}_{n}"
+        path = day / (stem + _codec_ext(cfg.codec))
         if self.encoder_name:
             from .video import FFmpegWriter
             writer = FFmpegWriter(path, cfg.fps, (cfg.width, cfg.height), self.encoder_name, cfg.crf)

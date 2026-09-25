@@ -67,6 +67,9 @@ def main() -> None:
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
     cfg = load_config(args.config)
+    from .web import sanitize_config
+    for fix in sanitize_config(cfg):
+        logging.warning("Invalid setting in %s reset to default: %s", args.config, fix)
     if not Path(args.config).exists():
         save_config(cfg, args.config)
         logging.info("Created default settings file %s", args.config)

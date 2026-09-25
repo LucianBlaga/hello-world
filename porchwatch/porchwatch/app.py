@@ -128,19 +128,29 @@ class App:
 
         start_web(self)
         threading.Thread(target=self._retention_loop, name="retention", daemon=True).start()
+        failures = 0
         try:
             while not self._quit:
                 self._restart = False
+                started = time.time()
                 try:
                     self._run_pipeline()
                     self.error = None
+                    failures = 0
                 except Exception as exc:
                     log.exception("Pipeline error")
                     self.error = str(exc)
                     self.status = {"state": "error"}
                     if self.video:
                         raise
-                    time.sleep(3)       # e.g. camera unplugged: retry
+                    # e.g. camera unplugged: retry, waiting longer each time (3 s .. 60 s)
+                    # so a persistent fault doesn't reopen the camera every few seconds.
+                    failures = 1 if time.time() - started > 60 else failures + 1
+                    delay = min(60.0, 3.0 * 2 ** (failures - 1))
+                    log.info("Retrying in %.0f s", delay)
+                    end = time.time() + delay
+                    while time.time() < end and not self._quit and not self._restart:
+                        time.sleep(0.2)
                 if self.video and not self._restart:
                     break               # finished the test video
         finally:
@@ -159,6 +169,14 @@ class App:
                 log.exception("Retention clean-up failed")
             time.sleep(600)
 
+    def _save_config(self) -> None:
+        """Saving must never take the camera pipeline down (e.g. file locked by an editor)."""
+        from .config import save_config
+        try:
+            save_config(self.cfg, self.config_path)
+        except OSError as exc:
+            log.error("Could not save settings: %s", exc)
+
     def _handle_manual(self, ptz, ctl):
         while not self._ptz_cmds.empty():
             action = self._ptz_cmds.get_nowait()
@@ -173,16 +191,14 @@ class App:
                 side = "left" if action.endswith("left") else "right"
                 with self.cfg_lock:
                     setattr(self.cfg.patrol, f"{side}_pan", round(st.pan, 1))
-                from .config import save_config
-                save_config(self.cfg, self.config_path)
+                self._save_config()
                 self.storage.log(f"Patrol {side} edge set to pan {st.pan:.1f}")
                 continue
             if action == "set_home":
                 with self.cfg_lock:
                     c = self.cfg.camera
                     c.home_pan, c.home_tilt, c.home_zoom = round(st.pan, 1), round(st.tilt, 1), round(st.zoom, 2)
-                from .config import save_config
-                save_config(self.cfg, self.config_path)
+                self._save_config()
                 self.storage.log(f"Home set to pan {st.pan:.1f}, tilt {st.tilt:.1f}, zoom {st.zoom:.1f}x")
                 continue
             # Any manual move pauses auto-tracking until "home" is pressed.
@@ -279,6 +295,11 @@ class App:
                         if not self._show(vis, ptz, ctl):
                             self._quit = True
         finally:
+            if self.controller is not None:
+                try:
+                    self.controller.flush()
+                except Exception:
+                    log.exception("Could not save the capture in progress")
             if recorder:
                 recorder.close()
             if self.audio is not None:

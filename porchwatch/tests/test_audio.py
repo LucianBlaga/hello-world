@@ -145,6 +145,8 @@ def _record(tmp_path, codec, crf=28, audio=None):
     rec = Recorder(rc, audio=audio)
     t = time.time()
     for i, f in enumerate(_street_frames(60)):         # 4 s of video
+        while rec.q.qsize() >= 4:                        # real-time pace, like a camera
+            time.sleep(0.002)
         rec.feed(f, t + i / 15, active=True)
     rec.close()
     return [p for p in (tmp_path / codec).rglob("*") if p.is_file()]

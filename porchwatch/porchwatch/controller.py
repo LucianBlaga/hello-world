@@ -158,6 +158,12 @@ class Controller:
     def ptz_enabled(self) -> bool:
         return self._ptz_hw and self.cfg.tracking_enabled
 
+    def flush(self, now: float | None = None) -> None:
+        """Pipeline stopping (settings change, shutdown, end of video): save what the
+        current chase has collected instead of throwing it away."""
+        if self.target is not None:
+            self._finish(time.time() if now is None else now, "stopped")
+
     def reset(self) -> None:
         """Drop the current target without saving (e.g. manual control took over)."""
         self.target = None

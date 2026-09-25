@@ -113,9 +113,9 @@ class AudioSource:
         self._rec_samples = 0
         self._q: queue.Queue = queue.Queue(maxsize=400)
         self._running = True
-        self._thread = threading.Thread(target=self._loop, name="audio", daemon=True)
-        self._thread.start()
         block = int(self.sr * 0.05)
+        # Open the microphone BEFORE starting the worker thread: if opening fails,
+        # no thread is left spinning behind (one per failed pipeline start).
         if stream_factory is None:
             import sounddevice as sd
 
@@ -124,7 +124,18 @@ class AudioSource:
                                          callback=self._callback)
         else:
             self.stream = stream_factory(self._callback, self.sr, block)
-        self.stream.start()
+        self._thread = threading.Thread(target=self._loop, name="audio", daemon=True)
+        self._thread.start()
+        try:
+            self.stream.start()
+        except Exception:
+            self._running = False
+            self._thread.join(timeout=2)
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            raise
 
     # -- capture ----------------------------------------------------------
     def _callback(self, indata, frames, time_info, status):

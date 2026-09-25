@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import copy
 import functools
+import hmac
+import ipaddress
 import logging
+import math
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
+import cv2
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 
-from .config import config_to_dict, save_config, update_config
-import cv2
-
 from . import __version__
+from .config import config_to_dict, save_config, update_config
 from .imaging import downscale
 from .storage import disk_usage
 
@@ -171,7 +174,8 @@ SCHEMA = [
          "help": "0.0.0.0 makes the dashboard reachable from other devices on your network (takes effect after restarting the program)."},
         {"key": "web.port", "label": "Port", "type": "number", "min": 1024, "max": 65535, "step": 1},
         {"key": "web.username", "label": "Username", "type": "text"},
-        {"key": "web.password", "label": "Password", "type": "password", "help": "Leave empty for no login (only safe on 127.0.0.1)."},
+        {"key": "web.password", "label": "Password", "type": "password",
+         "help": "Needed before using 0.0.0.0. Leave empty to keep the current password; type NONE to remove it."},
         {"key": "web.stream_fps", "label": "Live view fps", "type": "number", "min": 1, "max": 30, "step": 1},
         {"key": "web.stream_width", "label": "Live view width", "type": "select", "options": [640, 960, 1280, 1920]},
         {"key": "show_preview", "label": "Local preview window", "type": "bool", "restart": True},
@@ -199,6 +203,115 @@ def _flatten(d, prefix=""):
     return out
 
 
+def _schema_index() -> dict:
+    """dotted key -> schema field (both keys of a resolution pair map to it)."""
+    idx = {}
+    for sec in SCHEMA:
+        for f in sec["fields"]:
+            if f["type"] == "zones":
+                continue
+            for k in (f["key"] if isinstance(f["key"], list) else [f["key"]]):
+                idx[k] = f
+    return idx
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _valid_box(b) -> bool:
+    return (isinstance(b, (list, tuple)) and len(b) == 4 and all(_is_number(x) and 0 <= x <= 1 for x in b)
+            and b[0] < b[2] and b[1] < b[3])
+
+
+def validate_values(values: dict, keys, full: bool = True) -> list[str]:
+    """Check flattened settings `values` for `keys` against the limits and choices
+    the settings page offers. `full=False` (config file on start-up) only checks
+    numbers and on/off values, leaving free choices like custom model names alone."""
+    idx = _schema_index()
+    errors = []
+    for key in sorted(keys):
+        v = values.get(key)
+        f = idx.get(key)
+        if key == "detection.watch_zone":
+            if not _valid_box(v):
+                errors.append("Watch zone must be 4 numbers between 0 and 1")
+            continue
+        if key == "detection.ignore_zones":
+            if not isinstance(v, list) or not all(_valid_box(b) for b in v):
+                errors.append("Ignore zones must be boxes of 4 numbers between 0 and 1")
+            continue
+        if f is None:
+            continue
+        label, t = f["label"], f["type"]
+        if t in ("number", "range"):
+            if not _is_number(v):
+                errors.append(f"{label}: must be a number")
+            elif not f["min"] <= v <= f["max"]:
+                errors.append(f"{label}: must be between {f['min']} and {f['max']}")
+        elif t == "bool":
+            if not isinstance(v, bool):
+                errors.append(f"{label}: must be on or off")
+        elif not full:
+            # Config file on start-up: free choices are allowed, but numbers from a
+            # drop-down (frame rates, sizes) must still be sane - fps 0 would crash.
+            opts = f.get("options", [])
+            if t == "resolution":
+                if not (isinstance(v, int) and not isinstance(v, bool) and 16 <= v <= 8192):
+                    errors.append(f"{label}: must be a size between 16 and 8192")
+            elif t == "select" and opts and all(_is_number(o) for o in opts):
+                if not _is_number(v) or not min(opts) <= v <= max(opts):
+                    errors.append(f"{label}: must be between {min(opts)} and {max(opts)}")
+            continue
+        elif t == "select":
+            if str(v) not in [str(o) for o in f["options"]]:
+                errors.append(f"{label}: must be one of {', '.join(str(o) or 'auto' for o in f['options'])}")
+        elif t == "resolution":
+            res = f"{values.get(f['key'][0])}x{values.get(f['key'][1])}"
+            if res not in f["options"]:
+                errors.append(f"{label}: {res} is not one of {', '.join(f['options'])}")
+        elif t in ("text", "password"):
+            if not isinstance(v, str) and not (key == "camera.device" and isinstance(v, int)):
+                errors.append(f"{label}: must be text")
+    return list(dict.fromkeys(errors))
+
+
+def sanitize_config(cfg) -> list[str]:
+    """Reset out-of-range values in a loaded config file to defaults (e.g. a
+    hand-edited `fps: 0` would otherwise crash the pipeline in a loop)."""
+    from .config import Config
+
+    values = _flatten(config_to_dict(cfg))
+    defaults = _flatten(config_to_dict(Config()))
+    fixed = []
+    for key in values:
+        if validate_values(values, [key], full=False):
+            section, _, name = key.rpartition(".")
+            obj = cfg
+            for part in section.split(".") if section else []:
+                obj = getattr(obj, part)
+            setattr(obj, name, defaults[key] if not isinstance(defaults[key], list) else list(defaults[key]))
+            fixed.append(f"{key}={values[key]!r} -> {defaults[key]!r}")
+    return fixed
+
+
+def _host_allowed(host_header: str, allowed: list) -> bool:
+    """Blocks DNS rebinding: a web page on evil.example whose name resolves to
+    127.0.0.1 would otherwise reach this server with Host: evil.example."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        host = host[1:host.find("]")]
+    elif host.count(":") == 1:
+        host = host.split(":")[0]
+    if host in ("localhost", "") or host in [str(a).lower() for a in allowed]:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True                     # addressed by IP: fine (LAN access by IP works)
+    except ValueError:
+        return False
+
+
 def _check_writable(folder: str) -> str | None:
     """None if we can create and write to `folder`, else a readable reason."""
     if not str(folder).strip():
@@ -219,13 +332,32 @@ def create_app(ctx) -> Flask:
     app = Flask(__name__, static_folder=None)
     viewers_lock = threading.Lock()
 
+    @app.before_request
+    def guard():
+        if not _host_allowed(request.host, ctx.cfg.web.allowed_hosts):
+            return Response("Unknown host name. Use the PC's IP address, or add the name to "
+                            "web.allowed_hosts in config.yaml.", 403)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            # Other web sites must not be able to drive the camera from your browser:
+            # require a JSON body (a plain HTML form can't send one) and, when the
+            # browser says where the request comes from, that it's this page.
+            if not request.is_json:
+                return jsonify({"ok": False, "error": "Expected application/json"}), 415
+            origin = request.headers.get("Origin")
+            if origin is not None and urlparse(origin).netloc.lower() != request.host.lower():
+                return jsonify({"ok": False, "error": "Cross-site request refused"}), 403
+        return None
+
     def auth(fn):
         @functools.wraps(fn)
         def wrapper(*a, **kw):
             web = ctx.cfg.web
             if web.password:
                 a_ = request.authorization
-                if not a_ or a_.username != web.username or a_.password != web.password:
+                ok = (a_ is not None
+                      and hmac.compare_digest((a_.username or "").encode(), web.username.encode())
+                      and hmac.compare_digest((a_.password or "").encode(), web.password.encode()))
+                if not ok:
                     return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="PorchWatch"'})
             return fn(*a, **kw)
         return wrapper
@@ -329,12 +461,20 @@ def create_app(ctx) -> Flask:
     @app.get("/api/settings")
     @auth
     def get_settings():
-        return jsonify({"schema": SCHEMA, "values": config_to_dict(ctx.cfg)})
+        values = config_to_dict(ctx.cfg)
+        has_pw = bool(values["web"]["password"])
+        values["web"]["password"] = ""                  # never sent back to the browser
+        schema = copy.deepcopy(SCHEMA)
+        for sec in schema:
+            for f in sec["fields"]:
+                if f["key"] == "web.password" and has_pw:
+                    f["placeholder"] = "(password set - leave empty to keep it)"
+        return jsonify({"schema": schema, "values": values, "password_set": has_pw})
 
     @app.post("/api/settings")
     @auth
     def post_settings():
-        data = request.get_json(force=True, silent=True)
+        data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return jsonify({"ok": False, "error": "Expected a JSON object"}), 400
         new_cfg = copy.deepcopy(ctx.cfg)
@@ -342,8 +482,17 @@ def create_app(ctx) -> Flask:
             update_config(new_cfg, data)
         except (ValueError, TypeError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
+        # The page never receives the password: empty means "keep it", NONE removes it.
+        posted_pw = (data.get("web") or {}).get("password") if isinstance(data.get("web"), dict) else None
+        if posted_pw == "" or posted_pw is None:
+            new_cfg.web.password = ctx.cfg.web.password
+        elif str(posted_pw).strip().upper() == "NONE":
+            new_cfg.web.password = ""
         before, after = _flatten(config_to_dict(ctx.cfg)), _flatten(config_to_dict(new_cfg))
         changed = {k for k in after if before.get(k) != after[k]}
+        errors = validate_values(after, changed)
+        if errors:
+            return jsonify({"ok": False, "error": "; ".join(errors)}), 400
         for key, label in (("recording.output_dir", "Recordings folder"), ("capture.output_dir", "Snapshots folder")):
             if key in changed:
                 problem = _check_writable(after[key])
@@ -357,21 +506,21 @@ def create_app(ctx) -> Flask:
     @app.post("/api/ptz")
     @auth
     def ptz():
-        data = request.get_json(force=True, silent=True) or {}
+        data = request.get_json(silent=True) or {}
         ok = ctx.manual_ptz(data.get("action", ""))
         return jsonify({"ok": ok})
 
     @app.post("/api/record")
     @auth
     def record():
-        data = request.get_json(force=True, silent=True) or {}
+        data = request.get_json(silent=True) or {}
         ctx.set_manual_record(bool(data.get("on", not ctx.manual_rec)))
         return jsonify({"manual_rec": ctx.manual_rec})
 
     @app.post("/api/pause")
     @auth
     def pause():
-        data = request.get_json(force=True, silent=True) or {}
+        data = request.get_json(silent=True) or {}
         ctx.paused = bool(data.get("paused", not ctx.paused))
         return jsonify({"paused": ctx.paused})
 

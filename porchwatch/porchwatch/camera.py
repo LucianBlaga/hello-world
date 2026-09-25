@@ -211,12 +211,13 @@ class PTZ:
         """
         c = self.cfg
         now = self.clock() if now is None else now
-        dt = max(0.0, now - self._est_t)
-        self._est_t = now
-        target = self._cmds[0][1]
+        target, active_since = self._cmds[0][1], self._cmds[0][0] + c.ptz_latency_s
         for t_cmd, st in self._cmds:
             if t_cmd <= now - c.ptz_latency_s:
-                target = st
+                target, active_since = st, t_cmd + c.ptz_latency_s
+        # Only move for the part of this interval after the command took effect.
+        dt = max(0.0, now - max(self._est_t, active_since))
+        self._est_t = now
         while len(self._cmds) > 1 and self._cmds[1][0] <= now - c.ptz_latency_s:
             self._cmds.popleft()
         step = c.pan_speed_dps * dt
