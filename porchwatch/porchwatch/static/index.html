@@ -95,7 +95,7 @@
 </head>
 <body>
 <header>
-  <h1>PorchWatch</h1>
+  <h1>PorchWatch <span id="ver" class="muted" style="font-size:11px; font-weight:400"></span></h1>
   <nav>
     <button data-tab="live" class="active">Live</button>
     <button data-tab="events">Events</button>
@@ -223,6 +223,7 @@ async function refreshStatus() {
   try {
     const s = await api("api/status");
     paused = s.paused;
+    if (s.version) $("#ver").textContent = "v" + s.version;
     manualRec = !!s.manual_rec;
     const rb = $("#recbtn");
     rb.textContent = manualRec ? "■ STOP REC" : "● REC";

@@ -73,8 +73,10 @@ class ObjectDetector:
     def __call__(self, frame: np.ndarray) -> list[Detection]:
         cfg = self.cfg
         classes = [0, *COCO_VEHICLES]
+        # No point in upscaling: cap at the frame's long side (multiple of 32).
+        imgsz = min(int(cfg.imgsz), (max(frame.shape[:2]) + 31) // 32 * 32)
         res = self.model.predict(
-            frame, imgsz=cfg.imgsz, conf=min(cfg.person_conf, cfg.vehicle_conf),
+            frame, imgsz=imgsz, conf=min(cfg.person_conf, cfg.vehicle_conf),
             classes=classes, device=cfg.device or None, verbose=False,
         )[0]
         dets = []

@@ -11,6 +11,7 @@ from pathlib import Path
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 
 from .config import config_to_dict, save_config, update_config
+from . import __version__
 from .storage import disk_usage
 
 log = logging.getLogger(__name__)
@@ -105,9 +106,13 @@ SCHEMA = [
         {"key": "detection.motion_min_travel", "label": "Moving-vehicle threshold", "type": "range", "min": 0.005, "max": 0.1, "step": 0.005,
          "help": "How far (fraction of frame width) a vehicle must move to count as moving. Parked cars are ignored."},
         {"key": "detection.model", "label": "Detection model", "type": "select",
-         "options": ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt"], "restart": True,
-         "help": "n = fastest, m = most accurate (needs a GPU for real time)."},
-        {"key": "detection.imgsz", "label": "Detection image size", "type": "select", "options": [480, 640, 960, 1280], "restart": True},
+         "options": ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"], "restart": True,
+         "help": "n = fastest ... x = most accurate. With an NVIDIA GPU, m or l is a good balance."},
+        {"key": "detection.imgsz", "label": "Detection image size", "type": "select",
+         "options": [640, 960, 1280, 1600, 1920, 2560, 3840], "restart": True,
+         "help": "How much of the picture's detail the detector sees. Bigger finds people and cars much further "
+                 "away, but each doubling is ~4x the work - watch Processing fps on the Live page. "
+                 "Never bigger than the capture resolution (it is capped automatically)."},
         {"key": "detection.device", "label": "Compute device", "type": "select", "options": ["", "cpu", "cuda:0", "mps"],
          "restart": True, "help": "Empty = automatic."},
         {"key": "zones", "label": "Zones", "type": "zones",
@@ -221,7 +226,10 @@ def create_app(ctx) -> Flask:
     @app.get("/")
     @auth
     def index():
-        return send_file(STATIC / "index.html")
+        # Never serve a stale page after an update.
+        resp = send_file(STATIC / "index.html", max_age=0)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.get("/stream.mjpg")
     @auth
@@ -265,6 +273,7 @@ def create_app(ctx) -> Flask:
             "recording_file": str(rec.current_file) if rec and rec.current_file else None,
             "paused": ctx.paused,
             "manual_rec": getattr(ctx, "manual_rec", False),
+            "version": __version__,
             "patrol": ctx.cfg.patrol.enabled,
             "audio": ({"level_db": round(ctx.audio.level_db, 1)} if getattr(ctx, "audio", None) else None),
             "error": ctx.error,
