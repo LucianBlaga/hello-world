@@ -245,7 +245,8 @@ async function refreshStatus() {
     const rows = [
       ["State", s.state], ["Target", s.target || "—"],
       ["Pan / tilt", `${s.pan ?? "—"}° / ${s.tilt ?? "—"}°`], ["Zoom", s.zoom ? s.zoom + "×" : "—"],
-      ["Processing", s.fps + " fps"], ["Camera", (s.camera_fps || 0) + " fps"], ["Recording", (s.recording ? "yes" : "no") + (s.encoder ? ` · ${s.encoder}` : "")],
+      ["Processing", s.fps + " fps"], ["Camera", (s.camera_fps || 0) + " fps"],
+      ...(s.tensorrt && s.tensorrt !== "off" ? [["TensorRT", s.tensorrt]] : []), ["Recording", (s.recording ? "yes" : "no") + (s.encoder ? ` · ${s.encoder}` : "")],
       ["Storage", s.storage ? `${s.storage.used_gb} GB used · ${s.storage.free_gb} GB free` : "—"],
     ];
     if (s.last_event) rows.push(["Last capture", `${s.last_event.time.slice(11)} ${s.last_event.plate || s.last_event.label}`]);

@@ -357,3 +357,42 @@ def test_leftover_model_files_are_tidied(tmp_path, monkeypatch):
     det.tidy_model_files(tmp_path)
     assert (tmp_path / "models" / "yolo26m.pt").exists()
     assert not (tmp_path / "yolo26m.pt").exists() and not stale.exists()
+
+
+# ------------------------------------------------------------------ TensorRT option
+
+def test_tensorrt_engine_size_and_name():
+    from porchwatch.detectors import engine_path, engine_size
+    assert engine_size(1280, (2160, 3840, 3)) == (736, 1280)      # 16:9, not a padded square
+    assert engine_size(3840, (1080, 1920, 3)) == (1088, 1920)     # capped at the frame
+    assert engine_size(1280, (1920, 1080, 3)) == (1280, 736)      # portrait camera
+    a = engine_path("yolo26m.pt", (736, 1280), True, "10.1")
+    assert a.name == "yolo26m_1280x736_fp16_trt10.1.engine"
+    # anything that makes an engine invalid gives a different file
+    assert len({a, engine_path("yolo26l.pt", (736, 1280), True, "10.1"),
+                engine_path("yolo26m.pt", (1088, 1920), True, "10.1"),
+                engine_path("yolo26m.pt", (736, 1280), False, "10.1"),
+                engine_path("yolo26m.pt", (736, 1280), True, "10.2")}) == 5
+
+
+def test_tensorrt_missing_falls_back_to_pytorch(monkeypatch):
+    import builtins
+    from porchwatch.detectors import ObjectDetector
+    real_import = builtins.__import__
+
+    def no_trt(name, *a, **k):
+        if name == "tensorrt":
+            raise ImportError("no tensorrt")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", no_trt)
+    det = ObjectDetector.__new__(ObjectDetector)          # skip loading a real YOLO model
+    det.cfg = Config().detection
+    det.cfg.tensorrt = True
+    det.cuda, det.precision, det.engine, det._engine_thread, det.engine_status = True, {}, None, None, "off"
+    det._start_engine_build((2160, 3840, 3))
+    assert det.engine is None and det._engine_thread is None
+    assert "pip install tensorrt" in det.engine_status
+
+    det.cuda, det.engine_status = False, "off"
+    det._start_engine_build((2160, 3840, 3))
+    assert det.engine_status == "needs an NVIDIA GPU"

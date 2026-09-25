@@ -126,6 +126,10 @@ SCHEMA = [
          "help": "How much of the picture's detail the detector sees. Bigger finds people and cars further away, "
                  "but costs a lot: on an RTX A4500 with yolo26m, 1280 runs about twice as fast as 1920. "
                  "1280 is a good choice at 4K. Capped at the capture resolution."},
+        {"key": "detection.tensorrt", "label": "Use TensorRT (NVIDIA)", "type": "bool", "restart": True,
+         "help": "Converts the model for your graphics card: typically 2-3x faster detection. The first start "
+                 "builds it in the background (a few minutes; detection keeps working meanwhile). Needs: "
+                 "python -m pip install tensorrt. Rebuilt automatically when model or image size change."},
         {"key": "detection.fp16", "label": "Half precision (FP16)", "type": "bool", "restart": True,
          "help": "NVIDIA GPUs only: about 1.3-1.6x faster detection with practically the same accuracy."},
         {"key": "detection.device", "label": "Compute device", "type": "select", "options": ["", "cpu", "cuda:0", "mps"],
@@ -436,6 +440,7 @@ def create_app(ctx) -> Flask:
             "error": ctx.error,
             "storage": disk_usage(ctx.cfg.recording.output_dir),     # cached: not a disk walk per request
             "camera_fps": round(getattr(ctx, "camera_fps", 0.0), 1),
+            "tensorrt": getattr(getattr(ctx, "_detector", None), "engine_status", None),
             "log": list(ctx.storage.messages)[-30:] if ctx.storage else [],
         })
 

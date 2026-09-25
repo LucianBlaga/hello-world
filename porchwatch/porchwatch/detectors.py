@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -102,6 +103,23 @@ def tidy_model_files(folder: Path | None = None) -> None:
             pass
 
 
+def engine_size(imgsz: int, frame_shape) -> tuple[int, int]:
+    """(h, w) for a TensorRT engine: the long side = imgsz (capped at the frame),
+    the short side following the frame's shape, both multiples of 32. A 16:9
+    engine skips the black bars a square one would process."""
+    fh, fw = frame_shape[:2]
+    long_side = min(int(imgsz), (max(fh, fw) + 31) // 32 * 32)
+    short = int(np.ceil(long_side * min(fh, fw) / max(fh, fw) / 32) * 32)
+    return (short, long_side) if fw >= fh else (long_side, short)
+
+
+def engine_path(model: str, size: tuple, fp16: bool, trt_version: str) -> Path:
+    """Engines only work for the model, input size, precision and TensorRT version
+    they were built with: all of that goes in the name, so a change rebuilds."""
+    stem = Path(model).stem
+    return MODELS_DIR / f"{stem}_{size[1]}x{size[0]}_{'fp16' if fp16 else 'fp32'}_trt{trt_version}.engine"
+
+
 class ObjectDetector:
     def __init__(self, cfg: DetectionConfig):
         from ultralytics import YOLO
@@ -111,21 +129,74 @@ class ObjectDetector:
         # Ultralytics downloads a missing model to exactly this path.
         self.model = YOLO(str(model_path(cfg.model)))
         self.precision: dict = {}
-        if cfg.fp16 and cfg.device not in ("cpu", "mps"):
+        self.cuda = False
+        if cfg.device not in ("cpu", "mps"):
             try:
                 import torch
-                if torch.cuda.is_available():
-                    self.precision = {"quantize": 16}   # FP16 (older ultralytics: half=True)
+                self.cuda = torch.cuda.is_available()
             except ImportError:
                 pass
+        if cfg.fp16 and self.cuda:
+            self.precision = {"quantize": 16}           # FP16 (older ultralytics: half=True)
+        # TensorRT: built once in the background; PyTorch is used until it's ready.
+        self.engine = None                              # YOLO model running a TensorRT engine
+        self.engine_imgsz = None                        # (h, w) the engine was built for
+        self._engine_thread: threading.Thread | None = None
+        self.engine_status = "off"
+
+    def _start_engine_build(self, frame_shape) -> None:
+        cfg = self.cfg
+        if not self.cuda:
+            self.engine_status = "needs an NVIDIA GPU"
+            log.warning("TensorRT needs an NVIDIA GPU with CUDA; using PyTorch")
+            return
+        try:
+            import tensorrt
+        except ImportError:
+            self.engine_status = "not installed (python -m pip install tensorrt)"
+            log.warning("TensorRT not installed: python -m pip install tensorrt  (using PyTorch)")
+            return
+        h, w = engine_size(int(cfg.imgsz), frame_shape)
+        fp16 = bool(self.precision)
+        path = engine_path(cfg.model, (h, w), fp16, tensorrt.__version__)
+        self.engine_status = "building"
+        self._engine_thread = threading.Thread(target=self._build_engine, name="tensorrt",
+                                               args=(path, (h, w), fp16), daemon=True)
+        self._engine_thread.start()
+
+    def _build_engine(self, path: Path, size: tuple, fp16: bool) -> None:
+        from ultralytics import YOLO
+        try:
+            if not path.exists():
+                log.info("Building TensorRT engine %s - one time, takes a few minutes", path.name)
+                src = YOLO(str(model_path(self.cfg.model)))
+                args = dict(format="engine", imgsz=list(size), device=0, verbose=False)
+                try:
+                    out = src.export(**args, **({"quantize": 16} if fp16 else {}))
+                except SyntaxError:     # older ultralytics
+                    out = src.export(**args, half=fp16)
+                shutil.move(str(out), str(path))
+            self.engine = YOLO(str(path), task="detect")
+            self.engine_imgsz = size
+            self.engine_status = f"on ({size[1]}x{size[0]}{', FP16' if fp16 else ''})"
+            log.info("TensorRT engine ready: %s", path.name)
+        except Exception as exc:
+            self.engine_status = f"failed: {exc}"[:200]
+            log.error("TensorRT engine build failed, staying on PyTorch: %s", exc)
 
     def __call__(self, frame: np.ndarray) -> list[Detection]:
         cfg = self.cfg
         classes = [0, *COCO_VEHICLES]
+        if cfg.tensorrt and self._engine_thread is None and self.engine_status == "off":
+            self._start_engine_build(frame.shape)
+        common = dict(conf=min(cfg.person_conf, cfg.vehicle_conf), classes=classes, verbose=False)
+        if self.engine is not None:
+            # The engine has a fixed input size and its precision is built in.
+            res = self.engine.predict(frame, imgsz=list(self.engine_imgsz), device=cfg.device or 0, **common)[0]
+            return self._to_detections(res, frame)
         # No point in upscaling: cap at the frame's long side (multiple of 32).
         imgsz = min(int(cfg.imgsz), (max(frame.shape[:2]) + 31) // 32 * 32)
-        kwargs = dict(imgsz=imgsz, conf=min(cfg.person_conf, cfg.vehicle_conf),
-                      classes=classes, device=cfg.device or None, verbose=False, **self.precision)
+        kwargs = dict(imgsz=imgsz, device=cfg.device or None, **common, **self.precision)
         try:
             res = self.model.predict(frame, **kwargs)[0]
         except SyntaxError:             # ultralytics too old for `quantize`
@@ -135,6 +206,10 @@ class ObjectDetector:
             self.precision = {"half": True}
             kwargs.pop("quantize")
             res = self.model.predict(frame, **kwargs, half=True)[0]
+        return self._to_detections(res, frame)
+
+    def _to_detections(self, res, frame) -> list[Detection]:
+        cfg = self.cfg
         dets = []
         for box, conf, cls in zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist(),
                                   res.boxes.cls.tolist()):

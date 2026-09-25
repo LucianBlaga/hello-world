@@ -56,6 +56,9 @@ class DetectionConfig:
     model: str = "yolo26n.pt"       # downloaded automatically by ultralytics
     device: str = ""                # "" = auto, "cpu", "cuda:0", "mps"
     fp16: bool = True               # half precision on NVIDIA GPUs: ~1.3-1.6x faster
+    # NVIDIA TensorRT: model converted for this GPU (one-time build, a few minutes,
+    # in the background). Typically 2-3x faster. Needs: pip install tensorrt
+    tensorrt: bool = False
     imgsz: int = 640
     person_conf: float = 0.45
     vehicle_conf: float = 0.40
