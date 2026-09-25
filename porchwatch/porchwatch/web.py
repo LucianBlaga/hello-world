@@ -53,14 +53,16 @@ SCHEMA = [
         {"key": "recording.post_record_s", "label": "Post-record (s)", "type": "number", "min": 0, "max": 120, "step": 1},
         {"key": "recording.segment_minutes", "label": "File length (min)", "type": "number", "min": 1, "max": 120, "step": 1},
         {"key": "recording.timestamp_overlay", "label": "Timestamp overlay", "type": "bool"},
-        {"key": "recording.output_dir", "label": "Recordings folder", "type": "text", "restart": True},
+        {"key": "recording.output_dir", "label": "Recordings folder", "type": "text", "restart": True,
+         "help": "Full path, e.g. D:\\PorchWatch\\recordings to record to another drive. Created if missing."},
     ]},
     {"title": "Storage", "fields": [
         {"key": "recording.retention_days", "label": "Keep recordings (days)", "type": "number", "min": 0, "max": 365, "step": 1,
          "help": "0 = forever. Old files are deleted automatically."},
         {"key": "recording.max_storage_gb", "label": "Max recordings size (GB)", "type": "number", "min": 0, "max": 10000, "step": 1},
         {"key": "capture.retention_days", "label": "Keep snapshots (days)", "type": "number", "min": 0, "max": 365, "step": 1},
-        {"key": "capture.output_dir", "label": "Snapshots folder", "type": "text", "restart": True},
+        {"key": "capture.output_dir", "label": "Snapshots folder", "type": "text", "restart": True,
+         "help": "Face / plate photos, e.g. D:\\PorchWatch\\captures."},
     ]},
     {"title": "Detection", "fields": [
         {"key": "detection.person_conf", "label": "Person sensitivity", "type": "range", "min": 0.2, "max": 0.9, "step": 0.05,
@@ -133,6 +135,21 @@ def _flatten(d, prefix=""):
         else:
             out[prefix + k] = v
     return out
+
+
+def _check_writable(folder: str) -> str | None:
+    """None if we can create and write to `folder`, else a readable reason."""
+    if not str(folder).strip():
+        return "folder can't be empty"
+    path = Path(folder).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".porchwatch_write_test"
+        probe.write_bytes(b"ok")
+        probe.unlink()
+    except OSError as exc:
+        return f"can't write to {path} ({exc.strerror or exc})"
+    return None
 
 
 def create_app(ctx) -> Flask:
@@ -234,6 +251,11 @@ def create_app(ctx) -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 400
         before, after = _flatten(config_to_dict(ctx.cfg)), _flatten(config_to_dict(new_cfg))
         changed = {k for k in after if before.get(k) != after[k]}
+        for key, label in (("recording.output_dir", "Recordings folder"), ("capture.output_dir", "Snapshots folder")):
+            if key in changed:
+                problem = _check_writable(after[key])
+                if problem:
+                    return jsonify({"ok": False, "error": f"{label}: {problem}"}), 400
         restart = bool(changed & _restart_keys())
         ctx.apply_config(new_cfg, restart=restart)
         save_config(new_cfg, ctx.config_path)

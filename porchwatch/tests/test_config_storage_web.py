@@ -137,3 +137,15 @@ def test_recording_plays_in_real_time_when_frames_arrive_slowly(tmp_path):
     cap = cv2.VideoCapture(str(f))
     duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
     assert 2.8 <= duration <= 3.2, duration
+
+
+def test_web_rejects_unwritable_folder(tmp_path):
+    client, ctx, applied = _client(tmp_path)
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")                 # a file where a folder is expected
+    r = client.post("/api/settings", json={"recording": {"output_dir": str(blocker / "rec")}})
+    assert r.status_code == 400 and "Recordings folder" in r.get_json()["error"]
+    assert not applied
+    good = tmp_path / "other_drive" / "recordings"
+    r = client.post("/api/settings", json={"recording": {"output_dir": str(good)}}).get_json()
+    assert r["ok"] and r["restarted"] and good.is_dir()
