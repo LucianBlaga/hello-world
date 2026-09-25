@@ -291,3 +291,29 @@ def test_moving_car_and_person_trigger_recording_only_when_enabled(tmp_path):
     assert not any(_active_after(sim, 3))
     sim.cfg.recording.trigger_people = True
     assert any(_active_after(sim, 1))
+
+
+def test_follow_until_gone_keeps_target_in_shot_until_it_leaves(tmp_path):
+    sim = Sim(tmp_path)
+    sim.cfg.tracking.follow_until_gone = True
+    p = person(sim, pan0=-20, speed=3.0)          # walks right, out of range after ~50 s
+    sim.objects.append(p)
+    tracking = []
+    sim.run(20, lambda s: tracking.append(s.ctl.state == State.TRACK))
+    # normal mode would have finished after a few seconds; follow mode is still on it
+    assert all(tracking[FPS * 2:]), "stopped following while the person was still visible"
+    assert not sim.events()
+    sim.objects.clear()                           # person leaves
+    sim.run(3)
+    assert sim.ctl.state == State.HOME
+    ev = sim.events()
+    assert len(ev) == 1 and ev[0]["reason"] == "left the view" and "face" in ev[0]["files"]
+
+
+def test_follow_until_gone_respects_time_limit(tmp_path):
+    sim = Sim(tmp_path)
+    sim.cfg.tracking.follow_until_gone = True
+    sim.cfg.tracking.follow_max_s = 5
+    sim.objects.append(person(sim, pan0=0, speed=0.0))
+    sim.run(8)
+    assert [e["reason"] for e in sim.events()] == ["follow time limit"]

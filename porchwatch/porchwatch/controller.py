@@ -284,6 +284,14 @@ class Controller:
             elif t.zoomed_at is None:
                 t.zoomed_at = now       # fixed camera: start collecting right away
 
+        if tc.follow_until_gone:
+            # Stay on it until it leaves the picture (or the safety limit), keeping
+            # the best face / plate collected along the way.
+            if now - t.last_seen > tc.lost_timeout_s:
+                return self._finish(now, "left the view")
+            if now - t.started > tc.follow_max_s:
+                return self._finish(now, "follow time limit")
+            return
         if t.accepted_plate:
             return self._finish(now, "plate read")
         if t.best_face and t.best_face[0] >= tc.face_fill * h * 0.8:

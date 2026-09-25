@@ -119,6 +119,11 @@ SCHEMA = [
          "help": "Face height as a fraction of the picture."},
         {"key": "tracking.plate_fill", "label": "Plate zoom target", "type": "range", "min": 0.05, "max": 0.5, "step": 0.01},
         {"key": "tracking.capture_window_s", "label": "Time zoomed in (s)", "type": "number", "min": 1, "max": 30, "step": 0.5},
+        {"key": "tracking.follow_until_gone", "label": "Follow until it leaves", "type": "bool",
+         "help": "Keep the person / car in the shot until it leaves the picture, instead of going back to "
+                 "watching or patrolling once a face or plate is captured. The best face / plate is still saved."},
+        {"key": "tracking.follow_max_s", "label": "Follow time limit (s)", "type": "number", "min": 10, "max": 600, "step": 10,
+         "help": "Safety limit in follow mode, e.g. for someone who stands still for a long time."},
         {"key": "tracking.max_track_s", "label": "Max chase time (s)", "type": "number", "min": 3, "max": 60, "step": 1},
         {"key": "tracking.lost_timeout_s", "label": "Give up when lost (s)", "type": "number", "min": 0.3, "max": 5, "step": 0.1},
         {"key": "tracking.recapture_after_s", "label": "Don't re-capture same target for (s)", "type": "number",

@@ -75,6 +75,10 @@ class TrackingConfig:
     lead_s: float = 0.25
     lost_timeout_s: float = 1.2
     max_track_s: float = 15.0
+    # Keep following a person / car until it leaves the picture instead of
+    # returning to watch/patrol as soon as a face or plate is captured.
+    follow_until_gone: bool = False
+    follow_max_s: float = 120.0     # safety limit in follow mode (e.g. someone standing still)
     capture_window_s: float = 4.0   # how long to keep collecting once zoomed in
     cooldown_s: float = 2.0         # after returning home, before picking a new target
     # Don't chase the same person/vehicle again for this long after a capture
